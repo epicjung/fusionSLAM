@@ -1,10 +1,15 @@
-#include <ros/ros.h>
+
+#ifndef UTILITY_H
+#define UTILITY_H
+
 #include <std_msgs/Header.h>
 #include <sensor_msgs/Imu.h>
 #include <sensor_msgs/PointCloud.h>
 #include <sensor_msgs/PointCloud2.h>
+#include <nav_msgs/Odometry.h>
+#include <deque>
+#include <opencv/cv.h>
 
-// #include <opencv2/core/eigen.hpp>
 #include <eigen3/Eigen/Dense>
 #include <eigen3/Eigen/Geometry>
 
@@ -22,90 +27,52 @@
 #include <pcl/filters/crop_box.h> 
 #include <pcl_conversions/pcl_conversions.h>
 
-
-struct VelodynePointXYZIRT
-{
-    PCL_ADD_POINT4D
-    PCL_ADD_INTENSITY;
-    uint16_t ring;
-    float time;
-    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-} EIGEN_ALIGN16;
-
-POINT_CLOUD_REGISTER_POINT_STRUCT (VelodynePointXYZIRT,
-    (float, x, x) (float, y, y) (float, z, z) (float, intensity, intensity)
-    (uint16_t, ring, ring) (float, time, time)
-)
-
-struct OusterPointXYZIRT {
-    PCL_ADD_POINT4D;
-    float intensity;
-    uint32_t t;
-    uint16_t reflectivity;
-    uint8_t ring;
-    uint16_t noise;
-    uint32_t range;
-    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-} EIGEN_ALIGN16;
-
-POINT_CLOUD_REGISTER_POINT_STRUCT(OusterPointXYZIRT,
-    (float, x, x) (float, y, y) (float, z, z) (float, intensity, intensity)
-    (uint32_t, t, t) (uint16_t, reflectivity, reflectivity)
-    (uint8_t, ring, ring) (uint16_t, noise, noise) (uint32_t, range, range)
-)
-
-using PointXYZIRT = VelodynePointXYZIRT;
+#include <tf/LinearMath/Quaternion.h>
+#include <tf/transform_listener.h>
+#include <tf/transform_datatypes.h>
+#include <tf/transform_broadcaster.h>
 
 typedef pcl::PointXYZI PointType;
 
-enum class SensorType { VELODYNE, OUSTER };
-
-using namespace std;
-
-class ParamServer
+class Utility
 {
 	public:
-		ros::NodeHandle nh;
 
-		// Topics
-		string cloud_topic;
-		string imu_topic;
-		string img_topic;
-
-		// Frames
-		string imu_frame;
-		string map_frmae;
-		string lidar_frame;
-		string camera_frame;
-
-		// LiDAR
-		SensorType sensor;
-		int N_SCAN;
-		int HORIZON_SCAN;
-		int downsample_rate;
-		float lidar_min_range;
-		float lidar_max_range;
-
-		ParamServer()
+		template<typename T>
+		static void imuRPY2rosRPY(sensor_msgs::Imu *thisImuMsg, T *rosRoll, T *rosPitch, T *rosYaw)
 		{
-			nh.param<std::string>("fusion/pointCloudTopic", cloud_topic, "points");
-			nh.param<std::string>("fusion/imuTopic", imu_topic, "imu");
-			nh.param<std::string>("fusion/imgTopic", img_topic, "image");
+		    double imuRoll, imuPitch, imuYaw;
+		    tf::Quaternion orientation;
+		    tf::quaternionMsgToTF(thisImuMsg->orientation, orientation);
+		    tf::Matrix3x3(orientation).getRPY(imuRoll, imuPitch, imuYaw);
 
-			string sensor_type;
-			nh.param<std::string>("fusion/sensor", sensor_type, "ouster");
-			if (sensor_type == "velodyne") sensor = SensorType::VELODYNE;
-			else if (sensor_type == "ouster") sensor = SensorType::OUSTER;
-			else 
-			{
-				ROS_ERROR_STREAM("Invalid sensor type.");
-				ros::shutdown();
-			}
+		    *rosRoll = imuRoll;
+		    *rosPitch = imuPitch;
+		    *rosYaw = imuYaw;
+		}
 
-			nh.param<int>("fusion/N_SCAN", N_SCAN, 16);
-			nh.param<int>("fusion/HORIZON_SCAN", HORIZON_SCAN, 1800);
-	        nh.param<int>("fusion/downsampleRate", downsample_rate, 1);
-	        nh.param<float>("fusion/lidarMinRange", lidar_min_range, 1.0);
-	        nh.param<float>("fusion/lidarMaxRange", lidar_max_range, 1000.0);
+		template<typename T>
+		static void imuAngular2rosAngular(sensor_msgs::Imu *thisImuMsg, T *angular_x, T *angular_y, T *angular_z)
+		{
+			*angular_x = thisImuMsg->angular_velocity.x;
+			*angular_y = thisImuMsg->angular_velocity.y;
+    		*angular_z = thisImuMsg->angular_velocity.z;
+		}
+
+		static float pointDistance(PointType p)
+		{
+		    return sqrt(p.x*p.x + p.y*p.y + p.z*p.z);
+		}
+
+		static sensor_msgs::PointCloud2 toROSPointCloud(pcl::PointCloud<PointType>::Ptr thisCloud, ros::Time thisStamp, std::string thisFrame)
+		{
+		    sensor_msgs::PointCloud2 tempCloud;
+		    pcl::toROSMsg(*thisCloud, tempCloud);
+		    tempCloud.header.stamp = thisStamp;
+		    tempCloud.header.frame_id = thisFrame;
+		    return tempCloud;
 		}
 };
+
+#endif
+

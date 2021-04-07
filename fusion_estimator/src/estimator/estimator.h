@@ -1,9 +1,14 @@
+#pragma once 
 
 #include <thread>
 #include <mutex>
 #include <queue>
 #include "fusion_estimator/CloudInfo.h"
+
 #include "../utility/utility.h"
+#include "../utility/parameters.h"
+#include "../featureExtractor/feature_extractor.h"
+
 using namespace std;
 using namespace Eigen;
 
@@ -15,34 +20,72 @@ class Estimator : public ParamServer
 		~Estimator();
 		void setParameter();
 		void allocateMemory();
+		void resetImageParameters();
+		void resetLaserParameters();
 		// data processing
-		void inputCloud(double t, const sensor_msgs::PointCloud2ConstPtr &cloud_msg);
+		void inputCloud(const sensor_msgs::PointCloud2ConstPtr &cloud_msg);
+		void inputOdom(const nav_msgs::Odometry::ConstPtr &odom_msg);
+		void inputIMU(const sensor_msgs::ImuConstPtr &imu_msg);
+		void inputImage(double t, const cv::Mat &img);
+
+		bool IMUAvailable(const double t);
+		bool getIMUInterval(double start, double end, vector<sensor_msgs::Imu> &imu_vec);
+
 		bool cachePointCloud();
-		void inputIMU(double t, const Vector3d &acc, const Vector3d &gyr);
-		bool IMUAvailable(const double t1, const double t2 = 0.0);
-		void processIMU(double t, double dt, const Vector3d &acc, const Vector3d &gyr);
+		void imuDeskew(vector<sensor_msgs::Imu> &imu_vec);
+		void odomDeskew();
+		void projectPointCloud();
+		void cloudExtraction();
+		void edgeSurfExtraction();
+		PointType deskewPoint(PointType *point, double rel_time);
+    	void findRotation(double pointTime, float *rotXCur, float *rotYCur, float *rotZCur);
+	    void findPosition(double relTime, float *posXCur, float *posYCur, float *posZCur);
+
+		// void processIMU(double t, double dt, const Vector3d &acc, const Vector3d &gyr);
 		void processMeasurements();
 
-		bool init_thread_flag;
-		bool deskew_flag;
-		bool ring_flag;
-		
-		mutex m_buf;
-		mutex m_process;
-		mutex m_propagate;
-		queue<pair<double, Vector3d>> acc_buf;
-		queue<pair<double, Vector3d>> gyr_buf;
-		queue<pair<double, sensor_msgs::PointCloud2>> cloud_buf;
-		thread process_thread;
+		// ros::Publisher pub_deskew;
+		// ros::Publisher pub_cloudInfo;
 
-		pair<double, sensor_msgs::PointCloud2> current_cloud;
-		pcl::PointCloud<PointXYZIRT>::Ptr laser_cloud_in;
-		pcl::PointCloud<OusterPointXYZIRT>::Ptr tmp_ouster_cloud_in;
-		pcl::PointCloud<PointType>::Ptr full_cloud;
-		pcl::PointCloud<PointType>::Ptr extracted_cloud;
-		fusion_estimator::CloudInfo cloud_info;
-		std_msgs::Header cloud_header;
-		double scan_start_time;
-		double scan_end_time;
+		queue<sensor_msgs::Imu> imuBuf;
+		queue<sensor_msgs::PointCloud2> cloudBuf;
+		queue<fusion_estimator::CloudInfo> cloudInfoBuf;
+		deque<nav_msgs::Odometry> odomBuf;
 
+		mutex mBuf;
+		mutex mProcess;
+		mutex mPropagate;
+		thread processThread;
+
+		FeatureExtractor featureExtractor;
+
+		bool initThreadFlag;
+		bool validPointFlag;
+		bool firstPointFlag;
+		bool odomDeskewFlag;
+		int deskewFlag;
+    	cv::Mat rangeMat;
+
+		sensor_msgs::PointCloud2 currentCloud;
+		pcl::PointCloud<PointXYZIRT>::Ptr laserCloudIn;
+		pcl::PointCloud<OusterPointXYZIRT>::Ptr tmpOusterCloudIn;
+		pcl::PointCloud<PointType>::Ptr fullCloud;
+		pcl::PointCloud<PointType>::Ptr extractedCloud;
+		fusion_estimator::CloudInfo cloudInfo;
+		std_msgs::Header cloudHeader;
+		double scanStartTime;
+		double scanEndTime;
+
+		int inputImageCnt;
+
+		double lastImuTime;
+		int imuPointerCur;
+		Vector3d imuR[1000];
+		Vector3d imuP[1000]; 
+
+		double imuTime[1000];		
+	    float odomIncreX;
+	    float odomIncreY;
+	    float odomIncreZ;
+        Eigen::Affine3f transStartInverse;
 };

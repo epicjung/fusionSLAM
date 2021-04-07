@@ -45,10 +45,13 @@ include_directories(
 catkin_package()
 
 add_library(fusion_lib
+  #src/utility/utility.cpp
+  #src/utility/parameters.cpp
 	src/estimator/estimator.cpp
-	)
+  src/featureExtractor/feature_extractor.cpp
+)
 
-target_link_libraries(fusion_lib ${catkin_LIBRARIES} ${OpenCV_LIBS} ${CERES_LIBRARIES})
+target_link_libraries(fusion_lib ${PCL_LIBRARIES} ${catkin_LIBRARIES} ${OpenCV_LIBS} ${CERES_LIBRARIES})
 
 add_executable(fusion_node src/run.cpp)
 target_link_libraries(fusion_node fusion_lib)
