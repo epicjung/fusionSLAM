@@ -8,6 +8,7 @@
 #include "../utility/utility.h"
 #include "../utility/parameters.h"
 #include "../featureExtractor/feature_extractor.h"
+#include "../featureTracker/feature_tracker.h"
 
 using namespace std;
 using namespace Eigen;
@@ -50,6 +51,7 @@ class Estimator : public ParamServer
 		queue<sensor_msgs::Imu> imuBuf;
 		queue<sensor_msgs::PointCloud2> cloudBuf;
 		queue<fusion_estimator::CloudInfo> cloudInfoBuf;
+    	queue<pair<double, map<int, vector<pair<int, Eigen::Matrix<double, 7, 1> > > > > > featureBuf;
 		deque<nav_msgs::Odometry> odomBuf;
 
 		mutex mBuf;
@@ -58,6 +60,7 @@ class Estimator : public ParamServer
 		thread processThread;
 
 		FeatureExtractor featureExtractor;
+		FeatureTracker featureTracker;
 
 		bool initThreadFlag;
 		bool validPointFlag;

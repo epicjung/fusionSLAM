@@ -418,7 +418,6 @@ void Estimator::inputCloud(const sensor_msgs::PointCloud2ConstPtr& cloud_msg)
 {
 	mBuf.lock();
 
-    printf("cloud_msg time: %f\n", cloud_msg->header.stamp.toSec());
 	// solution to error 
 	if (!cloudBuf.empty())
 	{
@@ -462,15 +461,12 @@ void Estimator::inputCloud(const sensor_msgs::PointCloud2ConstPtr& cloud_msg)
 	imuDeskew(imu_vec);
 
 	odomDeskew();
-	printf("Deskew\n");
 
 	projectPointCloud();
-	printf("projectPointCloud\n");
 
 	cloudExtraction();
-	printf("Cloud extraction\n");
+
 	edgeSurfExtraction();
-	printf("Edge Surf extraction\n");
 
 	resetLaserParameters();
 }
@@ -486,8 +482,9 @@ void Estimator::edgeSurfExtraction()
 	extractedCloudInfo = featureExtractor.extractEdgeSurfFeatures(cloudInfo);
     pcl::fromROSMsg(extractedCloudInfo.cloud_corner,  *laserCloudCornerLast);
     pcl::fromROSMsg(extractedCloudInfo.cloud_surface, *laserCloudSurfLast);
-    printf("Edge size: %d\n", laserCloudCornerLast->points.size());
-    printf("Surf size: %d\n", laserCloudSurfLast->points.size());
+    // printf("Edge size: %d\n", (int)laserCloudCornerLast->points.size());
+    // printf("Surf size: %d\n", (int)laserCloudSurfLast->points.size());
+	
 	mBuf.lock();
 	cloudInfoBuf.push(extractedCloudInfo);
 	mBuf.unlock();	
@@ -592,7 +589,14 @@ void Estimator::inputImage(double t, const cv::Mat &img)
 	inputImageCnt++;
 	map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> featureFrame;
 
-	// featureframe = 
+	featureFrame = featureTracker.trackImage(t, img);
+
+	if (inputImageCnt % 2 == 0)
+	{
+		mBuf.lock();
+		featureBuf.push(make_pair(t, featureFrame));
+		mBuf.unlock();
+	}
 }
 
 void Estimator::inputIMU(const sensor_msgs::ImuConstPtr &imu_msg)

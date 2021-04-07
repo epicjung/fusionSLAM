@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <queue>
+#include <cv_bridge/cv_bridge.h>
 #include "utility/parameters.h"
 #include "estimator/estimator.h"
 
@@ -14,6 +15,8 @@ class Manager : public ParamServer
 
         Estimator estimator;
 
+        std::mutex mBuf;
+
         Manager()
         {
             subImu = nh.subscribe(imuTopic, 2000, &Manager::imuCallback, this, ros::TransportHints().tcpNoDelay());
@@ -22,6 +25,28 @@ class Manager : public ParamServer
         }
 
         ~Manager(){}
+
+        cv::Mat getImageFromMsg(const sensor_msgs::ImageConstPtr &img_msg)
+        {
+            cv_bridge::CvImageConstPtr ptr;
+            if (img_msg->encoding == "8UC1")
+            {
+                sensor_msgs::Image img;
+                img.header = img_msg->header;
+                img.height = img_msg->height;
+                img.width = img_msg->width;
+                img.is_bigendian = img_msg->is_bigendian;
+                img.step = img_msg->step;
+                img.data = img_msg->data;
+                img.encoding = "mono8";
+                ptr = cv_bridge::toCvCopy(img, sensor_msgs::image_encodings::MONO8);
+            }
+            else
+                ptr = cv_bridge::toCvCopy(img_msg, sensor_msgs::image_encodings::MONO8);
+
+            cv::Mat img = ptr->image.clone();
+            return img;
+        }
 
         void imuCallback(const sensor_msgs::ImuConstPtr &imu_msg)
         {
@@ -39,7 +64,12 @@ class Manager : public ParamServer
 
         void imgCallback(const sensor_msgs::ImageConstPtr &img_msg)
         {
-
+            cv::Mat img;
+            double t = 0.0;
+            t = img_msg->header.stamp.toSec();
+            img = getImageFromMsg(img_msg);
+            if (!img.empty())
+                estimator.inputImage(t, img);
         }
 
         void cloudCallback(const sensor_msgs::PointCloud2ConstPtr &cloud_msg)

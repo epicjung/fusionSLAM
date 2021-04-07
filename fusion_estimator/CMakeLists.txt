@@ -10,6 +10,7 @@ find_package(catkin REQUIRED COMPONENTS
   cv_bridge
   image_transport
   pcl_conversions
+  camera_models
 )
 
 find_package(OpenCV REQUIRED)
@@ -45,10 +46,9 @@ include_directories(
 catkin_package()
 
 add_library(fusion_lib
-  #src/utility/utility.cpp
-  #src/utility/parameters.cpp
 	src/estimator/estimator.cpp
   src/featureExtractor/feature_extractor.cpp
+  src/featureTracker/feature_tracker.cpp
 )
 
 target_link_libraries(fusion_lib ${PCL_LIBRARIES} ${catkin_LIBRARIES} ${OpenCV_LIBS} ${CERES_LIBRARIES})

@@ -22,7 +22,7 @@
 #include "camodocal/camera_models/CameraFactory.h"
 #include "camodocal/camera_models/CataCamera.h"
 #include "camodocal/camera_models/PinholeCamera.h"
-#include "../estimator/parameters.h"
+#include "../utility/parameters.h"
 #include "../utility/tic_toc.h"
 
 using namespace std;
@@ -33,7 +33,7 @@ bool inBorder(const cv::Point2f &pt);
 void reduceVector(vector<cv::Point2f> &v, vector<uchar> status);
 void reduceVector(vector<int> &v, vector<uchar> status);
 
-class FeatureTracker
+class FeatureTracker : public ParamServer
 {
 public:
     FeatureTracker();
