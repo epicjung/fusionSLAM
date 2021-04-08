@@ -217,7 +217,7 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackIm
             ids.push_back(n_id++);
             track_cnt.push_back(1);
         }
-        //printf("feature cnt after add %d\n", (int)ids.size());
+        // printf("feature cnt after add %d\n", (int)ids.size());
     }
 
     cur_un_pts = undistortedPts(cur_pts, m_camera[0]);
@@ -333,7 +333,7 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackIm
         }
     }
 
-    //printf("feature track whole time %f\n", t_r.toc());
+    printf("feature track whole time %f\n", t_r.toc());
     return featureFrame;
 }
 
@@ -375,7 +375,16 @@ void FeatureTracker::readIntrinsicParameter(const vector<string> &calib_file)
 {
     for (size_t i = 0; i < calib_file.size(); i++)
     {
-        ROS_INFO("reading paramerter of camera %s", calib_file[i].c_str());
+        ROS_DEBUG("reading paramerter of camera %s", calib_file[i].c_str());
+        FILE *fh = fopen(calib_file[i].c_str(), "r");
+        if (fh == NULL)
+        {
+            ROS_WARN("config_file doesn't exist");
+            ROS_BREAK();
+            return;
+        }
+        fclose(fh);
+
         camodocal::CameraPtr camera = CameraFactory::instance()->generateCameraFromYamlFile(calib_file[i]);
         m_camera.push_back(camera);
     }

@@ -70,6 +70,7 @@ class Manager : public ParamServer
             img = getImageFromMsg(img_msg);
             if (!img.empty())
                 estimator.inputImage(t, img);
+            return;
         }
 
         void cloudCallback(const sensor_msgs::PointCloud2ConstPtr &cloud_msg)
@@ -86,7 +87,7 @@ int main(int argc, char **argv)
 
     Manager manager;
 
-    // manager.estimator.setParameter();
+    manager.estimator.setParameter();
 
     ROS_INFO("\033[1;32m----> Estimator node started.\033[0m");
 

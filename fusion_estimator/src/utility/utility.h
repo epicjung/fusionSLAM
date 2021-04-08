@@ -3,10 +3,12 @@
 #define UTILITY_H
 
 #include <std_msgs/Header.h>
+#include <std_msgs/Float64MultiArray.h>
 #include <sensor_msgs/Imu.h>
 #include <sensor_msgs/PointCloud.h>
 #include <sensor_msgs/PointCloud2.h>
 #include <nav_msgs/Odometry.h>
+#include <nav_msgs/Path.h>
 #include <deque>
 #include <opencv/cv.h>
 

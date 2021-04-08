@@ -3,13 +3,24 @@
 Estimator::Estimator()
 {
 	initThreadFlag= false;
+	initSystemFlag = false;
 	deskewFlag = 0;
-	lastImuTime = -1;
+	cloudFrameCount = 0;
+    prevImgTime = -1.0;
+
+    downSizeFilterCorner.setLeafSize(mappingCornerLeafSize, mappingCornerLeafSize, mappingCornerLeafSize);
+    downSizeFilterSurf.setLeafSize(mappingSurfLeafSize, mappingSurfLeafSize, mappingSurfLeafSize);
+    downSizeFilterSurroundingKeyPoses.setLeafSize(surroundingKeyframeDensity, surroundingKeyframeDensity, surroundingKeyframeDensity); // for surrounding key poses of scan-to-map optimization
+
+    laserCloudCornerFromMapDSNum = 0;
+    laserCloudSurfFromMapDSNum = 0;
+    laserCloudCornerDSNum = 0;
+    laserCloudSurfDSNum = 0;
 
 	allocateMemory();
-
 	resetLaserParameters();
-
+	resetImageParameters();
+	ROS_INFO("Estimator begins");
 }
 
 Estimator::~Estimator()
@@ -20,6 +31,17 @@ Estimator::~Estimator()
 void Estimator::setParameter()
 {
 	mProcess.lock();
+	for (int i = 0; i < NUM_OF_CAM; i++)
+	{
+		tic[i] = TIC[i];
+		ric[i] = RIC[i];
+        cout << " exitrinsic cam " << i << endl  << ric[i] << endl << tic[i].transpose() << endl;
+	}
+	td = TD;
+	g = G;
+    cout << "set g " << g.transpose() << endl;
+    featureTracker.readIntrinsicParameter(CAM_NAMES);
+
 	if (!initThreadFlag)
 	{
 		ROS_INFO("Thread begins");
@@ -35,20 +57,50 @@ void Estimator::allocateMemory()
 	tmpOusterCloudIn.reset(new pcl::PointCloud<OusterPointXYZIRT>);
 	fullCloud.reset(new pcl::PointCloud<PointType>());
 	extractedCloud.reset(new pcl::PointCloud<PointType>());
-
 	fullCloud->points.resize(N_SCAN*HORIZON_SCAN);
 
-	cloudInfo.startRingIndex.assign(N_SCAN, 0);
-	cloudInfo.endRingIndex.assign(N_SCAN, 0);
-	cloudInfo.pointColInd.assign(N_SCAN*HORIZON_SCAN, 0);
-	cloudInfo.pointRange.assign(N_SCAN*HORIZON_SCAN, 0);
+	cloudInfoOut.startRingIndex.assign(N_SCAN, 0);
+	cloudInfoOut.endRingIndex.assign(N_SCAN, 0);
+	cloudInfoOut.pointColInd.assign(N_SCAN*HORIZON_SCAN, 0);
+	cloudInfoOut.pointRange.assign(N_SCAN*HORIZON_SCAN, 0);
+
+    cloudKeyPoses3D.reset(new pcl::PointCloud<PointType>());
+    cloudKeyPoses6D.reset(new pcl::PointCloud<PointTypePose>());
+    // copy_cloudKeyPoses3D.reset(new pcl::PointCloud<PointType>());
+    // copy_cloudKeyPoses6D.reset(new pcl::PointCloud<PointTypePose>());
+
+    // kdtreeSurroundingKeyPoses.reset(new pcl::KdTreeFLANN<PointType>());
+    // kdtreeHistoryKeyPoses.reset(new pcl::KdTreeFLANN<PointType>());
+
+    laserCloudCorner.reset(new pcl::PointCloud<PointType>()); // corner feature set from odoOptimization
+    laserCloudSurf.reset(new pcl::PointCloud<PointType>()); // surf feature set from odoOptimization
+    laserCloudCornerDS.reset(new pcl::PointCloud<PointType>()); // downsampled corner featuer set from odoOptimization
+    laserCloudSurfDS.reset(new pcl::PointCloud<PointType>()); // downsampled surf featuer set from odoOptimization
+    
 	resetLaserParameters();
+}
+
+void Estimator::resetOptimization()
+{
+    gtsam::ISAM2Params optParameters;
+    optParameters.relinearizeThreshold = 0.1;
+    optParameters.relinearizeSkip = 1;
+    optimizer = new ISAM2(optParameters);
+
+    gtsam::NonlinearFactorGraph newFactorGraph;
+    factorGraph = newFactorGraph;
+
+    gtsam::Values newInitialEstimate;
+    gtsam::Values initialEstimate = newInitialEstimate;
+    gtsam::Values newCurrentEstimate;
+    gtsam::Values isamCurrentEstimate = newCurrentEstimate;
 }
 
 void Estimator::resetImageParameters()
 {
 	mProcess.lock();
 	inputImageCnt = 0;
+	imgFrameCount = 0;
 	mProcess.unlock();
 }
 
@@ -84,9 +136,8 @@ bool Estimator::IMUAvailable(const double t)
 
 bool Estimator::getIMUInterval(double start, double end, vector<sensor_msgs::Imu> &imu_vec)
 {
-	if(imuBuf.empty())
+	if(imuBuf.empty() || imuBuf.front().header.stamp.toSec() > start || imuBuf.back().header.stamp.toSec() < end)
 	{
-		printf("not receive imu\n");
 		return false;
 	}
 
@@ -106,7 +157,6 @@ bool Estimator::getIMUInterval(double start, double end, vector<sensor_msgs::Imu
 	}
 	else
 	{
-		printf("wait for imu\n");
 		return false;
 	}
 	return true;
@@ -115,7 +165,7 @@ bool Estimator::getIMUInterval(double start, double end, vector<sensor_msgs::Imu
 
 void Estimator::odomDeskew()
 {
-    cloudInfo.odomAvailable = false;
+    cloudInfoOut.odomAvailable = false;
 
     while (!odomBuf.empty())
     {
@@ -161,14 +211,14 @@ void Estimator::odomDeskew()
 
     ROS_WARN("imageProjection: initial guess");
     // Initial guess used in mapOptimization
-    cloudInfo.initialGuessX = startOdomMsg.pose.pose.position.x;
-    cloudInfo.initialGuessY = startOdomMsg.pose.pose.position.y;
-    cloudInfo.initialGuessZ = startOdomMsg.pose.pose.position.z;
-    cloudInfo.initialGuessRoll  = roll;
-    cloudInfo.initialGuessPitch = pitch;
-    cloudInfo.initialGuessYaw   = yaw;
+    cloudInfoOut.initialGuessX = startOdomMsg.pose.pose.position.x;
+    cloudInfoOut.initialGuessY = startOdomMsg.pose.pose.position.y;
+    cloudInfoOut.initialGuessZ = startOdomMsg.pose.pose.position.z;
+    cloudInfoOut.initialGuessRoll  = roll;
+    cloudInfoOut.initialGuessPitch = pitch;
+    cloudInfoOut.initialGuessYaw   = yaw;
 
-    cloudInfo.odomAvailable = true;
+    cloudInfoOut.odomAvailable = true;
 
     // get end odometry at the end of the scan
     odomDeskewFlag = false;
@@ -208,7 +258,7 @@ void Estimator::odomDeskew()
 
 void Estimator::imuDeskew(vector<sensor_msgs::Imu> &imu_vec)
 {
-	cloudInfo.imuAvailable = false;
+	cloudInfoOut.imuAvailable = false;
 
 	if (imu_vec.empty()) return;
 
@@ -220,7 +270,7 @@ void Estimator::imuDeskew(vector<sensor_msgs::Imu> &imu_vec)
 		double t = imu_vec[i].header.stamp.toSec();
 
 		if (t <= scanStartTime)
-			Utility::imuRPY2rosRPY(&this_imu, &cloudInfo.imuRollInit, &cloudInfo.imuPitchInit, &cloudInfo.imuYawInit);
+			Utility::imuRPY2rosRPY(&this_imu, &cloudInfoOut.imuRollInit, &cloudInfoOut.imuPitchInit, &cloudInfoOut.imuYawInit);
 
 		if (t > scanEndTime + 0.01)
 			break;
@@ -249,7 +299,7 @@ void Estimator::imuDeskew(vector<sensor_msgs::Imu> &imu_vec)
 
 	if (imuPointerCur <= 0) return;
 
-	cloudInfo.imuAvailable = true;
+	cloudInfoOut.imuAvailable = true;
 }
 
 
@@ -306,7 +356,7 @@ void Estimator::findPosition(double relTime, float *posXCur, float *posYCur, flo
 
     // If the sensor moves relatively slow, like walking speed, positional deskew seems to have little benefits. Thus code below is commented.
 
-    if (cloudInfo.odomAvailable == false || odomDeskewFlag == false)
+    if (cloudInfoOut.odomAvailable == false || odomDeskewFlag == false)
         return;
 
     float ratio = relTime / (scanEndTime - scanStartTime);
@@ -345,7 +395,7 @@ void Estimator::findRotation(double pointTime, float *rotXCur, float *rotYCur, f
 
 PointType Estimator::deskewPoint(PointType *point, double rel_time)
 {
-    if (deskewFlag==-1 || cloudInfo.imuAvailable == false)
+    if (deskewFlag==-1 || cloudInfoOut.imuAvailable == false)
         return *point;
 
     double point_time = scanStartTime + rel_time;
@@ -381,55 +431,255 @@ void Estimator::cloudExtraction()
     // extract segmented cloud for lidar odometry
     for (int i = 0; i < N_SCAN; ++i) // vertical channels
     {
-        cloudInfo.startRingIndex[i] = count - 1 + 5;
+        cloudInfoOut.startRingIndex[i] = count - 1 + 5;
 
         for (int j = 0; j < HORIZON_SCAN; ++j) // horizontal channels
         {
             if (rangeMat.at<float>(i,j) != FLT_MAX)
             {
                 // mark the points' column index for marking occlusion later
-                cloudInfo.pointColInd[count] = j;
+                cloudInfoOut.pointColInd[count] = j;
                 // save range info
-                cloudInfo.pointRange[count] = rangeMat.at<float>(i,j);
+                cloudInfoOut.pointRange[count] = rangeMat.at<float>(i,j);
                 // save extracted cloud
                 extractedCloud->push_back(fullCloud->points[j + i*HORIZON_SCAN]);
                 // size of extracted cloud
                 ++count;
             }
         }
-        cloudInfo.endRingIndex[i] = count -1 - 5;
+        cloudInfoOut.endRingIndex[i] = count -1 - 5;
     }
 
     // set up cloudInfo for feature extraction
-    cloudInfo.header = cloudHeader;
-    cloudInfo.cloud_deskewed = Utility::toROSPointCloud(extractedCloud, cloudHeader.stamp, lidarFrame);
+    cloudInfoOut.header = cloudHeader;
+    cloudInfoOut.cloud_deskewed = Utility::toROSPointCloud(extractedCloud, cloudHeader.stamp, lidarFrame);
 }
 
+void Estimator::updateInitialGuess()
+{
+	increOdomFront = trans2Affine3f(latestXYZ, latestRPY);
+
+	static Eigen::Affine3f lastImuTrans;
+
+	if (cloudKeyPoses3D->points.empty())
+	{
+		Vector3d initXYZ;
+		Vector3d initRPY;
+
+		initRPY = Vector3d(cloudInfoIn.imuRollInit, cloudInfoIn.imuPitchInit, cloudInfoIn.imuYawInit);
+		initXYZ.setZero();
+
+		latestXYZ = initXYZ;
+		latestRPY = initRPY;
+
+		lastImuTrans = trans2Affine3f(initXYZ, initRPY);
+		return;
+	}
+}
+
+void Estimator::extractSurroundingKeyFrames()
+{
+	if (cloudKeyPoses3D->points.empty())
+		return;
+
+	// extractNearby();
+}
+
+void Estimator::downsampleCurrentScan()
+{
+    // Downsample cloud from current scan
+    laserCloudCornerDS->clear();
+    downSizeFilterCorner.setInputCloud(laserCloudCorner); 
+    downSizeFilterCorner.filter(*laserCloudCornerDS); // Down-sampled corner points
+    laserCloudCornerDSNum = laserCloudCornerDS->size();
+
+    laserCloudSurfDS->clear();
+    downSizeFilterSurf.setInputCloud(laserCloudSurf);
+    downSizeFilterSurf.filter(*laserCloudSurfDS); // Down-sampled surface points
+    laserCloudSurfDSNum = laserCloudSurfDS->size();	
+}
+
+void Estimator::scan2MapOptimization()
+{
+	if (cloudKeyPoses3D->points.empty())
+		return;
+}
+
+bool Estimator::isCloudKeyframe()
+{
+	if (cloudKeyPoses3D->points.empty())
+		return true;
+}
+
+void Estimator::addOdomFactor()
+{
+	if (cloudKeyPoses3D->points.empty())
+	{
+        noiseModel::Diagonal::shared_ptr priorNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-2, 1e-2, M_PI*M_PI, 1e8, 1e8, 1e8).finished()); // rad*rad, meter*meter
+        factorGraph.add(PriorFactor<Pose3>(0, trans2gtsamPose(latestXYZ, latestRPY), priorNoise));
+        initialEstimate.insert(0, trans2gtsamPose(latestXYZ, latestRPY));
+	}
+}
+
+void Estimator::optimize()
+{
+	optimizer->update(factorGraph, initialEstimate);
+	optimizer->update();
+	factorGraph.resize(0);
+	initialEstimate.clear();
+
+	// save key poses
+	PointType thisPose3D;
+	Pose3 latestEstimate;
+}
+
+void Estimator::saveKeyframe(int type)
+{
+    PointType thisPose3D;
+    PointTypePose thisPose6D;
+    Pose3 latestEstimate;
+
+	isamCurrentEstimate = optimizer->calculateEstimate();
+	latestEstimate = isamCurrentEstimate.at<Pose3>(isamCurrentEstimate.size()-1);
+
+    thisPose3D.x = latestEstimate.translation().x();
+    thisPose3D.y = latestEstimate.translation().y();
+    thisPose3D.z = latestEstimate.translation().z();
+    thisPose3D.intensity = cloudKeyPoses3D->size(); // this can be used as index
+    cloudKeyPoses3D->push_back(thisPose3D); //cloudKeyPoses3D has xyz only
+
+    thisPose6D.x = thisPose3D.x;
+    thisPose6D.y = thisPose3D.y;
+    thisPose6D.z = thisPose3D.z;
+    thisPose6D.intensity = thisPose3D.intensity ; // this can be used as index
+    thisPose6D.roll  = latestEstimate.rotation().roll();
+    thisPose6D.pitch = latestEstimate.rotation().pitch();
+    thisPose6D.yaw   = latestEstimate.rotation().yaw();
+    thisPose6D.time = timeCloudInfoIn;
+    cloudKeyPoses6D->push_back(thisPose6D); //cloudKeyPoses6D has xyz and rotations
+
+    // cout << "****************************************************" << endl;
+    // cout << "Pose covariance:" << endl;
+    // cout << isam->marginalCovariance(isamCurrentEstimate.size()-1) << endl << endl;
+    poseCovariance = optimizer->marginalCovariance(isamCurrentEstimate.size()-1);
+
+    latestXYZ = (Vector3d() << latestEstimate.translation().x(), latestEstimate.translation().y(), latestEstimate.translation().z()).finished();
+    latestRPY = (Vector3d() << latestEstimate.rotation().roll(), latestEstimate.rotation().pitch(), latestEstimate.rotation().yaw()).finished();
+
+    ROS_INFO("\033[1;33mLatestXYZ: %f, %f, %f \033[0m", latestXYZ.x(), latestXYZ.y(), latestXYZ.z());
+    ROS_INFO("\033[1;33mLatestRPY: %f, %f, %f \033[0m", latestRPY.x(), latestRPY.y(), latestRPY.z());
+
+
+
+    if (type == 1) // pointcloud pose
+    {
+	    // save all the received edge and surf points
+	    pcl::PointCloud<PointType>::Ptr thisCornerKeyFrame(new pcl::PointCloud<PointType>());
+	    pcl::PointCloud<PointType>::Ptr thisSurfKeyFrame(new pcl::PointCloud<PointType>());
+	    pcl::copyPointCloud(*laserCloudCornerDS,  *thisCornerKeyFrame);
+	    pcl::copyPointCloud(*laserCloudSurfDS,    *thisSurfKeyFrame);
+	    cornerCloudKeyFrames.push_back(thisCornerKeyFrame);
+	    surfCloudKeyFrames.push_back(thisSurfKeyFrame);
+    }
+}
+
+void Estimator::publishOdometry()
+{
+
+}
 
 void Estimator::processMeasurements()
 {
-	while(1)
+	while (1)
 	{
+		if (!cloudInfoBuf.empty())
+		{
+			if (imgFrameCount == WINDOW_SIZE)
+			{
 
+			}
+			else
+			{
+				// printf("Not enough image keyframes\n");
+
+				// if (!initSystemFlag)
+				// {
+					// resetOptimization();
+
+					cloudInfoIn = std::move(cloudInfoBuf.front());	
+
+					timeCloudInfoIn = cloudInfoIn.header.stamp.toSec();
+
+					pcl::fromROSMsg(cloudInfoIn.cloud_corner, *laserCloudCorner);
+					pcl::fromROSMsg(cloudInfoIn.cloud_surface, *laserCloudSurf);
+
+					mBuf.lock();
+					cloudInfoBuf.pop();
+					mBuf.unlock();
+
+					mProcess.lock();
+
+					static double timeLastProcessing = -1;
+					if (timeCloudInfoIn - timeLastProcessing >= mappingProcessInterval)
+					{
+						timeLastProcessing = timeCloudInfoIn;
+
+						updateInitialGuess();
+
+						extractSurroundingKeyFrames();
+
+						downsampleCurrentScan();
+
+						scan2MapOptimization();
+
+						if (isCloudKeyframe())
+						{
+							addOdomFactor();
+
+							optimize();
+
+							saveKeyframe(1);
+						}
+
+					}
+
+					mProcess.unlock();
+
+
+					// printf("initImuVector size: %d\n", (int)initImuVector.size());
+
+					// initSystemFlag = true;
+				// }
+			}
+		}
+		else if (!featureBuf.empty())
+		{
+
+		}
+		else
+		{
+			// printf("No feature input yet.\n");
+		}
 	}
 }
 
 void Estimator::inputCloud(const sensor_msgs::PointCloud2ConstPtr& cloud_msg)
 {
 	mBuf.lock();
-
-	// solution to error 
-	if (!cloudBuf.empty())
-	{
-		if(cloudBuf.back().header.stamp.toSec() > cloud_msg->header.stamp.toSec())
-		{
-			while (!cloudBuf.empty())
-				cloudBuf.pop();
-		}
-	}
+	// // solution to error 
+	// if (!cloudBuf.empty())
+	// {
+	// 	if(cloudBuf.back().header.stamp.toSec() > cloud_msg->header.stamp.toSec())
+	// 	{
+	// 		while (!cloudBuf.empty())
+	// 			cloudBuf.pop();
+	// 	}
+	// }
 
 	cloudBuf.push(*cloud_msg);
 	mBuf.unlock();
+
+	ROS_WARN("cloudBuf size: %d", (int)cloudBuf.size());
 
 	// cache pointcloud
 	if (!cachePointCloud())
@@ -437,36 +687,40 @@ void Estimator::inputCloud(const sensor_msgs::PointCloud2ConstPtr& cloud_msg)
 		return;
 	}
 
+    vector<sensor_msgs::Imu> imuVector;
 	// check imu
 	while(1)
 	{
-		if (IMUAvailable(scanEndTime))
+        mBuf.lock();
+		if (IMUAvailable(scanEndTime) && getIMUInterval(scanStartTime, scanEndTime, imuVector))
 		{
 			ROS_WARN("Imu available");
 			break;
 		}
 		else
 		{
-			ROS_INFO("waiting for imu...\n");
+            ROS_WARN("imuBuf size: %d", (int)imuBuf.size());
+            ROS_WARN("imuVector size: %d", (int)imuVector.size());
+			ROS_INFO("waiting for imu...");
 			std::chrono::milliseconds dura(5);
 			std::this_thread::sleep_for(dura);
 		}
+        mBuf.unlock();
 	}
 
-	vector<sensor_msgs::Imu> imu_vec;
-	mBuf.lock();
-	getIMUInterval(scanStartTime, scanEndTime, imu_vec);
-	mBuf.unlock();
-
-	imuDeskew(imu_vec);
+	imuDeskew(imuVector);
 
 	odomDeskew();
+	ROS_INFO("deskew");
 
 	projectPointCloud();
+	ROS_INFO("projectPointCloud");
 
 	cloudExtraction();
+	ROS_INFO("cloudExtraction");
 
 	edgeSurfExtraction();
+	ROS_INFO("edgeSurfExtraction");
 
 	resetLaserParameters();
 }
@@ -474,14 +728,12 @@ void Estimator::inputCloud(const sensor_msgs::PointCloud2ConstPtr& cloud_msg)
 void Estimator::edgeSurfExtraction()
 {
 	fusion_estimator::CloudInfo extractedCloudInfo;
-	pcl::PointCloud<PointType>::Ptr laserCloudCornerLast;
-	pcl::PointCloud<PointType>::Ptr laserCloudSurfLast;
-	laserCloudCornerLast.reset(new pcl::PointCloud<PointType>());
-	laserCloudSurfLast.reset(new pcl::PointCloud<PointType>());
+	// pcl::PointCloud<PointType>::Ptr laserCloudCornerLast;
+	// pcl::PointCloud<PointType>::Ptr laserCloudSurfLast;
+	// laserCloudCornerLast.reset(new pcl::PointCloud<PointType>());
+	// laserCloudSurfLast.reset(new pcl::PointCloud<PointType>());
 
-	extractedCloudInfo = featureExtractor.extractEdgeSurfFeatures(cloudInfo);
-    pcl::fromROSMsg(extractedCloudInfo.cloud_corner,  *laserCloudCornerLast);
-    pcl::fromROSMsg(extractedCloudInfo.cloud_surface, *laserCloudSurfLast);
+	extractedCloudInfo = featureExtractor.extractEdgeSurfFeatures(cloudInfoOut);
     // printf("Edge size: %d\n", (int)laserCloudCornerLast->points.size());
     // printf("Surf size: %d\n", (int)laserCloudSurfLast->points.size());
 	
@@ -586,6 +838,8 @@ bool Estimator::cachePointCloud()
 
 void Estimator::inputImage(double t, const cv::Mat &img)
 {
+    // image time error should be fixed
+    prevImgTime = t;
 	inputImageCnt++;
 	map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> featureFrame;
 
@@ -601,9 +855,21 @@ void Estimator::inputImage(double t, const cv::Mat &img)
 
 void Estimator::inputIMU(const sensor_msgs::ImuConstPtr &imu_msg)
 {
-	mBuf.lock();
-	imuBuf.push(*imu_msg);
-	mBuf.unlock();
+
+    mBuf.lock();
+    // // check validity
+    // if (!imuBuf.empty())
+    // {
+    //     if(imuBuf.back().header.stamp.toSec() > imu_msg->header.stamp.toSec())
+    //     {
+    //         printf("Invalid imu measurements. Pop all\n");
+    //         while (!imuBuf.empty())
+    //             imuBuf.pop();
+    //     }
+    // }
+
+    imuBuf.push(*imu_msg);
+    mBuf.unlock();
 }
 
 void Estimator::inputOdom(const nav_msgs::Odometry::ConstPtr& odom_msg)
@@ -620,3 +886,14 @@ void Estimator::inputOdom(const nav_msgs::Odometry::ConstPtr& odom_msg)
 // 	gyr_buf.push(make_pair(t, gyr));
 // 	mBuf.unlock();
 // }
+
+Affine3f Estimator::trans2Affine3f(Vector3d XYZ, Vector3d RPY)
+{
+    return pcl::getTransformation(XYZ.x(), XYZ.y(), XYZ.z(), RPY.x(), RPY.y(), RPY.z());
+}
+
+gtsam::Pose3 Estimator::trans2gtsamPose(Eigen::Vector3d XYZ, Eigen::Vector3d RPY)
+{
+    return gtsam::Pose3(gtsam::Rot3::RzRyRx(RPY.x(), RPY.y(), RPY.z()), 
+                              gtsam::Point3(XYZ.x(), XYZ.y(), XYZ.z()));
+}

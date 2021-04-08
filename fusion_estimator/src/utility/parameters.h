@@ -2,7 +2,7 @@
 #define PARAMETER_H
 
 #include <ros/ros.h>
-
+#include <ros/package.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 
@@ -160,8 +160,9 @@ class ParamServer
 
 		//#define UNIT_SPHERE_ERROR
 
+	    string calibFile;
 		float FOCAL_LENGTH;
-	    int WINDOW_SIZE;
+	    // int WINDOW_SIZE;
 	    int NUM_OF_F;
 
 		double INIT_DEPTH;
@@ -172,9 +173,10 @@ class ParamServer
 		double ACC_N, ACC_W;
 		double GYR_N, GYR_W;
 
-		std::vector<Eigen::Matrix3d> RIC;
-		std::vector<Eigen::Vector3d> TIC;
 		Eigen::Vector3d G;
+		double gNorm;
+
+		vector<string> CAM_NAMES;
 
 		double BIAS_ACC_THRESHOLD;
 		double BIAS_GYR_THRESHOLD;
@@ -186,6 +188,12 @@ class ParamServer
 		std::string IMU_TOPIC;
 		double TD;
 		int ESTIMATE_TD;
+
+		vector<double> extImuCamRot;
+		vector<double> extImuCamTrans;
+		vector<Eigen::Matrix3d> RIC;
+		vector<Eigen::Vector3d> TIC;
+
 		int ROW, COL;
 		int NUM_OF_CAM;
 		int STEREO;
@@ -210,6 +218,31 @@ class ParamServer
 			nh.param<std::string>("fusion/imuFrame", imuFrame, "imu_frame");
 			nh.param<std::string>("fusion/mapFrame", mapFrame, "map_frame");
 
+	        nh.param<int>("fusion/estimateExtrinsic", ESTIMATE_EXTRINSIC, 1);
+	        nh.param<vector<double>>("fusion/imuCamRotation/data", extImuCamRot, vector<double>());
+	        nh.param<vector<double>>("fusion/imuCamTranslation/data", extImuCamTrans, vector<double>());
+	        
+		    if (ESTIMATE_EXTRINSIC == 2)
+		    {
+		        ROS_WARN("have no prior about extrinsic param, calibrate extrinsic param");
+		        RIC.push_back(Eigen::Matrix3d::Identity());
+		        TIC.push_back(Eigen::Vector3d::Zero());
+		        // EX_CALIB_RESULT_PATH = OUTPUT_FOLDER + "/extrinsic_parameter.csv";
+		    }
+		    else 
+		    {
+		        if ( ESTIMATE_EXTRINSIC == 1)
+		        {
+		            ROS_WARN(" Optimize extrinsic param around initial guess!");
+		            // EX_CALIB_RESULT_PATH = OUTPUT_FOLDER + "/extrinsic_parameter.csv";
+		        }
+		        if (ESTIMATE_EXTRINSIC == 0)
+		            ROS_WARN(" fix extrinsic param ");
+
+				RIC.push_back(Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extImuCamRot.data(), 3, 3));
+				TIC.push_back(Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extImuCamTrans.data(), 3, 1));
+		    } 
+
 			string sensor_type;
 			nh.param<std::string>("fusion/laser/sensor", sensor_type, "ouster");
 			if (sensor_type == "velodyne") sensor = SensorType::VELODYNE;
@@ -232,10 +265,15 @@ class ParamServer
 	        nh.param<float>("fusion/imu/imuGyrBiasN", imuGyrBiasN, 0.00003);
 	        nh.param<float>("fusion/imu/imuGravity", imuGravity, 9.80511);
 	        nh.param<float>("fusion/imu/imuRPYWeight", imuRPYWeight, 0.01);
+	        nh.param<double>("fusion/imu/gNorm", gNorm, 9.8);
+	        G.z() = gNorm;
+
+	        nh.param<vector<double>>("fusion/imu/imu2gpsTrans", imu2gpsTransV, vector<double>());
+
+
 	        nh.param<vector<double>>("fusion/laser/extrinsicRot", extRotV, vector<double>());
 	        nh.param<vector<double>>("fusion/laser/extrinsicRPY", extRPYV, vector<double>());
 	        nh.param<vector<double>>("fusion/laser/extrinsicTrans", extTransV, vector<double>());
-	        nh.param<vector<double>>("fusion/imu2gpsTrans", imu2gpsTransV, vector<double>());
 	        extRot = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extRotV.data(), 3, 3);
 	        extRPY = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extRPYV.data(), 3, 3);
 	        extTrans = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extTransV.data(), 3, 1);
@@ -274,8 +312,13 @@ class ParamServer
 	        nh.param<float>("fusion/laser/globalMapVisualizationPoseDensity", globalMapVisualizationPoseDensity, 10.0);
 	        nh.param<float>("fusion/laser/globalMapVisualizationLeafSize", globalMapVisualizationLeafSize, 1.0);
 
+	        nh.param<string>("fusion/camera/calib", calibFile, ".yaml");
+	        string configPath = ros::package::getPath("fusion_estimator") + "/config/";
+	        string camPath = configPath + calibFile;
+	        CAM_NAMES.push_back(camPath);
+
 	        nh.param<float>("fusion/camera/focalLength", FOCAL_LENGTH, 460.0);
-	        nh.param<int>("fusion/camera/windowSize", WINDOW_SIZE, 10);
+	        // nh.param<int>("fusion/camera/windowSize", WINDOW_SIZE, 10);
 	        nh.param<int>("fusion/camera/numOfF", NUM_OF_F, 1000);
 
 	        nh.param<double>("fusion/camera/initDepth", INIT_DEPTH, 1.0);
@@ -283,14 +326,12 @@ class ParamServer
 	        
 	        MIN_PARALLAX = KEYFRAME_PARALLAX / FOCAL_LENGTH;
 
-	        nh.param<int>("fusion/camera/estimateExtrinsic", ESTIMATE_EXTRINSIC, 1);
-
 	        nh.param<double>("fusion/camera/solverTime", SOLVER_TIME, 0.0);
 	        nh.param<int>("fusion/camera/numIterations", NUM_ITERATIONS, 2);
 	        nh.param<double>("fusion/camera/TD", TD, 1.0);
 	        nh.param<int>("fusion/camera/estimateTD", ESTIMATE_TD, 1);
-	        nh.param<int>("fusion/camera/imgHeight", ROW, 1);
-	        nh.param<int>("fusion/camera/imgWidth", COL, 1);
+	        nh.param<int>("fusion/camera/imageHeight", ROW, 1);
+	        nh.param<int>("fusion/camera/imageWidth", COL, 1);
 	        
 	        nh.param<int>("fusion/camera/maxCnt", MAX_CNT, 100);
 	        nh.param<int>("fusion/camera/minDist", MIN_DIST, 100);
@@ -298,6 +339,7 @@ class ParamServer
 	        nh.param<int>("fusion/camera/showTrack", SHOW_TRACK, 1);
 	        nh.param<int>("fusion/camera/flowBack", FLOW_BACK, 1);
 
+	        printf("Parameters have been loaded\n");
 		}
 
 };

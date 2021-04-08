@@ -15,7 +15,7 @@ find_package(catkin REQUIRED COMPONENTS
 
 find_package(OpenCV REQUIRED)
 find_package(PCL REQUIRED QUIET)
-find_package(Ceres REQUIRED)
+find_package(GTSAM REQUIRED QUIET)
 
 add_message_files(
   DIRECTORY msg
@@ -31,19 +31,25 @@ generate_messages(
   sensor_msgs
 )
 
-include_directories(
-  ${catkin_INCLUDE_DIRS}
-  ${CERES_INCLUDE_DIRS}
-)
-
 set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 find_package(Eigen3)
+
 include_directories(
   ${catkin_INCLUDE_DIRS}
-  ${EIGEN3_INCLUDE_DIR}
+  ${PCL_INCLUDE_DIRS}
+  ${OpenCV_INCLUDE_DIRS}
+  ${GTSAM_INCLUDE_DIR}
 )
 
-catkin_package()
+link_directories(
+  ${PCL_LIBRARY_DIRS}
+  ${OpenCV_LIBRARY_DIRS}
+  ${GTSAM_LIBRARY_DIRS}
+)
+
+catkin_package(
+  DEPENDS PCL GTSAM
+)
 
 add_library(fusion_lib
 	src/estimator/estimator.cpp
@@ -51,7 +57,7 @@ add_library(fusion_lib
   src/featureTracker/feature_tracker.cpp
 )
 
-target_link_libraries(fusion_lib ${PCL_LIBRARIES} ${catkin_LIBRARIES} ${OpenCV_LIBS} ${CERES_LIBRARIES})
+target_link_libraries(fusion_lib ${PCL_LIBRARIES} ${catkin_LIBRARIES} ${OpenCV_LIBS} ${CERES_LIBRARIES} gtsam)
 
 add_executable(fusion_node src/run.cpp)
 target_link_libraries(fusion_node fusion_lib)
