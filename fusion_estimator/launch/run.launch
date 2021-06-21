@@ -1,5 +1,6 @@
 <launch>
 	<rosparam file="$(find fusion_estimator)/config/params.yaml" command="load"/>
     <node name="republish" type="republish" pkg="image_transport" output="screen" args="compressed in:=/out out:=/camera/image"/>
+    <!-- <node name="republish" type="republish" pkg="image_transport" output="screen" args="compressed in:=/rgb/image_raw out:=/camera/image"/> -->
 	<node pkg="fusion_estimator" type="fusion_node" name="fusion_estimator" output="screen"/>
 </launch>

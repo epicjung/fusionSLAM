@@ -12,6 +12,11 @@ Estimator::Estimator()
     downSizeFilterSurf.setLeafSize(mappingSurfLeafSize, mappingSurfLeafSize, mappingSurfLeafSize);
     downSizeFilterSurroundingKeyPoses.setLeafSize(surroundingKeyframeDensity, surroundingKeyframeDensity, surroundingKeyframeDensity); // for surrounding key poses of scan-to-map optimization
 
+    ISAM2Params parameters;
+    parameters.relinearizeThreshold = 0.1;
+    parameters.relinearizeSkip = 1;
+    optimizer = new ISAM2(parameters);
+
     laserCloudCornerFromMapDSNum = 0;
     laserCloudSurfFromMapDSNum = 0;
     laserCloudCornerDSNum = 0;
@@ -128,37 +133,58 @@ void Estimator::resetLaserParameters()
 
 bool Estimator::IMUAvailable(const double t)
 {
+	printf("scanEnd: %f\n", t);
+	printf("imu back: %f\n", imuBuf.back().header.stamp.toSec());
 	if (!imuBuf.empty() && t <= imuBuf.back().header.stamp.toSec())
-		return true;
+    {
+        return true;
+    }
 	else
 		return false;
 }
 
 bool Estimator::getIMUInterval(double start, double end, vector<sensor_msgs::Imu> &imu_vec)
 {
+	if (imuBuf.empty())
+	{
+		printf("No imu\n");
+		return false;		
+	}
+	mBuf.lock();
+	printf("scanStart: %f\n", start);
+	printf("scanEnd: %f\n", end);
+	printf("imuBuf front: %f\n", imuBuf.front().header.stamp.toSec());
+	printf("imuBuf end: %f\n", imuBuf.back().header.stamp.toSec());
+	mBuf.unlock();
+
 	if(imuBuf.empty() || imuBuf.front().header.stamp.toSec() > start || imuBuf.back().header.stamp.toSec() < end)
 	{
+		printf("No IMU in between\n");
 		return false;
 	}
 
-	if(end <= imuBuf.back().header.stamp.toSec())
+	while (imuBuf.front().header.stamp.toSec() <= start - 0.01) // ~= prev cloud's end time
 	{
-		while (imuBuf.front().header.stamp.toSec() <= start - 0.01)
+		mBuf.lock();
+		imuBuf.pop_front();
+		mBuf.unlock();
+	}
+	for (int i = 0; i < (int)imuBuf.size(); ++i)
+	{
+		if (imuBuf[i].header.stamp.toSec() <= end + 0.01)
 		{
-			imuBuf.pop();
+			mBuf.lock();
+			imu_vec.push_back(imuBuf[i]);
+			mBuf.unlock();
 		}
+		else
+		{
+			break;
+		}
+	}
+	printf("Last imuVector %f\n", imu_vec[imu_vec.size()-1].header.stamp.toSec());
+	ROS_WARN("imu interval size: %d", imu_vec.size());
 
-		while (imuBuf.front().header.stamp.toSec() <= end + 0.01)
-		{
-			imu_vec.push_back(imuBuf.front());
-			imuBuf.pop();
-		}
-		ROS_WARN("imu interval size: %d", imu_vec.size());
-	}
-	else
-	{
-		return false;
-	}
 	return true;
 }
 
@@ -523,14 +549,11 @@ void Estimator::addOdomFactor()
 
 void Estimator::optimize()
 {
+    factorGraph.print("GTSAM Graph:\n");
 	optimizer->update(factorGraph, initialEstimate);
 	optimizer->update();
 	factorGraph.resize(0);
 	initialEstimate.clear();
-
-	// save key poses
-	PointType thisPose3D;
-	Pose3 latestEstimate;
 }
 
 void Estimator::saveKeyframe(int type)
@@ -617,6 +640,15 @@ void Estimator::processMeasurements()
 					cloudInfoBuf.pop();
 					mBuf.unlock();
 
+					cout << "Edge:" << laserCloudCorner->points.size() << endl;
+					cout << "Surf:" << laserCloudSurf->points.size() << endl;
+
+					if (laserCloudCorner->points.size() == 0 && laserCloudSurf->points.size() == 0)
+					{
+						printf("Invalid pointcloud\n");
+						continue;
+					}
+
 					mProcess.lock();
 
 					static double timeLastProcessing = -1;
@@ -625,26 +657,43 @@ void Estimator::processMeasurements()
 						timeLastProcessing = timeCloudInfoIn;
 
 						updateInitialGuess();
+						cout<< "updateInitialGuess" << endl;
 
 						extractSurroundingKeyFrames();
+						cout<< "extractSurroundingKeyFrames" << endl;
 
 						downsampleCurrentScan();
+						cout<< "downsampleCurrentScan" << endl;
 
 						scan2MapOptimization();
+						cout<< "scan2MapOptimization" << endl;
 
 						if (isCloudKeyframe())
 						{
+							printf("isCloudKeyframe\n");
+
 							addOdomFactor();
+							printf("addOdomFactor\n");
 
 							optimize();
+							printf("optimize\n");
 
 							saveKeyframe(1);
+							printf("saveKeyframe\n");
+
+							initSystemFlag = true;
 						}
 
 					}
 
 					mProcess.unlock();
 
+					if (initSystemFlag)
+					{
+						printf("Next cloud time:%f\n", cloudBuf.front().header.stamp.toSec());
+						// printf("IMU current front time: %f\n", imuBuf.front().header.stamp.toSec());
+						// std::terminate();
+					}
 
 					// printf("initImuVector size: %d\n", (int)initImuVector.size());
 
@@ -658,8 +707,10 @@ void Estimator::processMeasurements()
 		}
 		else
 		{
-			// printf("No feature input yet.\n");
+
 		}
+        std::chrono::milliseconds dura(2);
+        std::this_thread::sleep_for(dura);
 	}
 }
 
@@ -691,7 +742,6 @@ void Estimator::inputCloud(const sensor_msgs::PointCloud2ConstPtr& cloud_msg)
 	// check imu
 	while(1)
 	{
-        mBuf.lock();
 		if (IMUAvailable(scanEndTime) && getIMUInterval(scanStartTime, scanEndTime, imuVector))
 		{
 			ROS_WARN("Imu available");
@@ -705,8 +755,24 @@ void Estimator::inputCloud(const sensor_msgs::PointCloud2ConstPtr& cloud_msg)
 			std::chrono::milliseconds dura(5);
 			std::this_thread::sleep_for(dura);
 		}
-        mBuf.unlock();
 	}
+
+    // check camera
+    pair<double, map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>>> nearestFeature; 
+    while(1)
+    {
+        if (imageAvailable(scanStartTime) && getFirstImage(scanStartTime, scanEndTime, nearestFeature))
+        {
+            ROS_WARN("Image available");
+            break;
+        }
+        else
+        {
+            ROS_WARN("No Image available; SLAM with only LIDAR");
+            break;
+        }
+    }
+
 
 	imuDeskew(imuVector);
 
@@ -725,18 +791,58 @@ void Estimator::inputCloud(const sensor_msgs::PointCloud2ConstPtr& cloud_msg)
 	resetLaserParameters();
 }
 
+// void Estimator::imageDeskew(const double time)
+// {
+    
+// }
+
+bool Estimator::imageAvailable(const double time)
+{
+    if (!featureBuf.empty() && time <= featureBuf.back().first)
+    {
+        ROS_INFO("Image available");
+        return true;
+    } 
+    else
+    {
+        return false;
+    }
+}
+
+bool Estimator::getFirstImage(const double start, const double end, pair<double, map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>>> &feature)
+{
+    if (featureBuf.empty())
+    {
+        printf("No feature buffer available\n");
+        return false;
+    }
+
+    // Pop old features
+    while (featureBuf.front().first <= start)
+    {
+        mBuf.lock();
+        featureBuf.pop_front();
+        mBuf.unlock();
+    }
+
+    // Get first feature
+    if (!featureBuf.empty())
+    {
+        feature = featureBuf.front();
+        printf("First image at time: %f\n", feature.first);
+        return true;
+    }
+}
+
 void Estimator::edgeSurfExtraction()
 {
 	fusion_estimator::CloudInfo extractedCloudInfo;
-	// pcl::PointCloud<PointType>::Ptr laserCloudCornerLast;
-	// pcl::PointCloud<PointType>::Ptr laserCloudSurfLast;
-	// laserCloudCornerLast.reset(new pcl::PointCloud<PointType>());
-	// laserCloudSurfLast.reset(new pcl::PointCloud<PointType>());
+	
+	ROS_INFO("extract features");
 
 	extractedCloudInfo = featureExtractor.extractEdgeSurfFeatures(cloudInfoOut);
-    // printf("Edge size: %d\n", (int)laserCloudCornerLast->points.size());
-    // printf("Surf size: %d\n", (int)laserCloudSurfLast->points.size());
-	
+	ROS_INFO("Info cloudinfoBuf");
+
 	mBuf.lock();
 	cloudInfoBuf.push(extractedCloudInfo);
 	mBuf.unlock();	
@@ -845,12 +951,12 @@ void Estimator::inputImage(double t, const cv::Mat &img)
 
 	featureFrame = featureTracker.trackImage(t, img);
 
-	if (inputImageCnt % 2 == 0)
-	{
+	// if (inputImageCnt % 2 == 0) // 바꿔도 됨 
+	// {
 		mBuf.lock();
-		featureBuf.push(make_pair(t, featureFrame));
+		featureBuf.push_back(make_pair(t, featureFrame));
 		mBuf.unlock();
-	}
+	// }
 }
 
 void Estimator::inputIMU(const sensor_msgs::ImuConstPtr &imu_msg)
@@ -864,11 +970,11 @@ void Estimator::inputIMU(const sensor_msgs::ImuConstPtr &imu_msg)
     //     {
     //         printf("Invalid imu measurements. Pop all\n");
     //         while (!imuBuf.empty())
-    //             imuBuf.pop();
+    //             imuBuf.pop_front();
     //     }
     // }
 
-    imuBuf.push(*imu_msg);
+    imuBuf.push_back(*imu_msg);
     mBuf.unlock();
 }
 

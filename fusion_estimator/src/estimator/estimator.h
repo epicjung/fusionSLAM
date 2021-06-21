@@ -77,8 +77,13 @@ class Estimator : public ParamServer
 		void inputIMU(const sensor_msgs::ImuConstPtr &imu_msg);
 		void inputImage(double t, const cv::Mat &img);
 
+		// Imu-related
 		bool IMUAvailable(const double t);
 		bool getIMUInterval(double start, double end, vector<sensor_msgs::Imu> &imu_vec);
+
+		// Image-related
+		bool imageAvailable(const double time);
+		bool getFirstImage(const double start, const double end, pair<double, map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>>> &feature);
 
 		bool cachePointCloud();
 		void imuDeskew(vector<sensor_msgs::Imu> &imu_vec);
@@ -110,10 +115,10 @@ class Estimator : public ParamServer
 		// ros::Publisher pub_deskew;
 		// ros::Publisher pub_cloudInfo;
 
-		queue<sensor_msgs::Imu> imuBuf;
+		deque<sensor_msgs::Imu> imuBuf;
 		queue<sensor_msgs::PointCloud2> cloudBuf;
 		queue<fusion_estimator::CloudInfo> cloudInfoBuf;
-    	queue<pair<double, map<int, vector<pair<int, Eigen::Matrix<double, 7, 1> > > > > > featureBuf;
+    	deque<pair<double, map<int, vector<pair<int, Eigen::Matrix<double, 7, 1> > > > > > featureBuf;
 		deque<nav_msgs::Odometry> odomBuf;
 		fusion_estimator::CloudInfo cloudInfoIn; 
 
