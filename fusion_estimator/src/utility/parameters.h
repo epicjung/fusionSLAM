@@ -6,6 +6,26 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 
+#include <gtsam/geometry/Rot3.h>
+#include <gtsam/geometry/Pose3.h>
+#include <gtsam/slam/PriorFactor.h>
+#include <gtsam/slam/BetweenFactor.h>
+#include <gtsam/navigation/GPSFactor.h>
+#include <gtsam/navigation/ImuFactor.h>
+#include <gtsam/navigation/CombinedImuFactor.h>
+#include <gtsam/nonlinear/NonlinearFactorGraph.h>
+#include <gtsam/nonlinear/LevenbergMarquardtOptimizer.h>
+#include <gtsam/nonlinear/Marginals.h>
+#include <gtsam/nonlinear/Values.h>
+#include <gtsam/inference/Symbol.h>
+
+#include <gtsam/nonlinear/ISAM2.h>
+#include <gtsam_unstable/nonlinear/IncrementalFixedLagSmoother.h>
+
+using namespace std;
+using namespace Eigen;
+using namespace gtsam;
+
 struct VelodynePointXYZIRT
 {
     PCL_ADD_POINT4D
@@ -61,6 +81,11 @@ enum NoiseOrder
     O_GW = 9
 };
 
+using symbol_shorthand::X; // Pose3 (x,y,z,r,p,y)
+using symbol_shorthand::V; // Vel   (xdot,ydot,zdot)
+using symbol_shorthand::B; // Bias  (ax,ay,az,gx,gy,gz)
+using symbol_shorthand::G; // GPS pose
+
 using PointXYZIRT = VelodynePointXYZIRT;
 
 typedef pcl::PointXYZI PointType;
@@ -78,6 +103,7 @@ class ParamServer
 		string cloudTopic;
 		string imuTopic;
 		string imgTopic;
+		string odomTopic;
 
 		// Frames
 		string imuFrame;
@@ -214,9 +240,12 @@ class ParamServer
 			nh.param<std::string>("fusion/cloudTopic", cloudTopic, "points");
 			nh.param<std::string>("fusion/imuTopic", imuTopic, "imu");
 			nh.param<std::string>("fusion/imgTopic", imgTopic, "image");
+			nh.param<std::string>("fusion/odomTopic", odomTopic, "odom");
+
 			nh.param<std::string>("fusion/lidarFrame", lidarFrame, "lidar_frame");
 			nh.param<std::string>("fusion/imuFrame", imuFrame, "imu_frame");
 			nh.param<std::string>("fusion/mapFrame", mapFrame, "map_frame");
+
 
 	        nh.param<int>("fusion/estimateExtrinsic", ESTIMATE_EXTRINSIC, 1);
 	        nh.param<vector<double>>("fusion/imuCamRotation/data", extImuCamRot, vector<double>());

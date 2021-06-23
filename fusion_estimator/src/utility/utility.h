@@ -33,6 +33,7 @@
 #include <tf/transform_listener.h>
 #include <tf/transform_datatypes.h>
 #include <tf/transform_broadcaster.h>
+#include <tf/tf.h>
 
 typedef pcl::PointXYZI PointType;
 
@@ -73,6 +74,12 @@ class Utility
 		    tempCloud.header.stamp = thisStamp;
 		    tempCloud.header.frame_id = thisFrame;
 		    return tempCloud;
+		}
+
+		template<typename T>
+		static double ROS_TIME(T msg)
+		{
+			return msg->header.stamp.toSec();
 		}
 };
 

@@ -3,10 +3,12 @@ fusion:
   cloudTopic: "/os_cloud_node/points"
   imuTopic: "/imu/data"
   imgTopic: "/camera/image"  
+  odomTopic: "/odometry"
 
   # frames
   lidarFrame: "lidar"
   imuFrame: "base_link"
+  camFrame: "cam"
   mapFrame: "map"
 
   # Extrinsic parameter between IMU and Camera.

@@ -15,8 +15,6 @@ class Manager : public ParamServer
 
         Estimator estimator;
 
-        std::mutex mBuf;
-
         Manager()
         {
             subImu = nh.subscribe(imuTopic, 2000, &Manager::imuCallback, this, ros::TransportHints().tcpNoDelay());
@@ -90,8 +88,6 @@ int main(int argc, char **argv)
     manager.estimator.setParameter();
 
     ROS_INFO("\033[1;32m----> Estimator node started.\033[0m");
-
-    // ROS_INFO("\033[1;32m----> Estimator node started.\033[0m");
 
     ros::MultiThreadedSpinner spinner(2);
     spinner.spin();

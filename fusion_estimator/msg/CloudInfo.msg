@@ -9,6 +9,7 @@ float32[] pointRange # point range
 
 int64 imuAvailable
 int64 odomAvailable
+int64 isCloud
 
 # Attitude for LOAM initialization
 float32 imuRollInit
