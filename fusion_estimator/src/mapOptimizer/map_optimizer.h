@@ -1,4 +1,5 @@
 #include "../utility/utility.h"
+#include "../utility/parameters.h"
 #include "fusion_estimator/CloudInfo.h"
 
 #include <gtsam/geometry/Rot3.h>
@@ -135,7 +136,7 @@ public:
 
     void allocateMemory();
 
-    void setCloudInfo(fusion_estimator::CloudInfo cloudInfoIn);
+    void setCloudInfo(const fusion_estimator::CloudInfo &cloudInfoIn);
 
     void pointAssociateToMap(PointType const * const pi, PointType * const po);
 

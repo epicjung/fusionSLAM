@@ -56,6 +56,7 @@ add_library(fusion_lib
   src/featureExtractor/feature_extractor.cpp
   src/featureTracker/feature_tracker.cpp
   src/preintegration/preintegration.cpp
+  src/mapOptimizer/map_optimizer.cpp
 )
 
 target_link_libraries(fusion_lib ${PCL_LIBRARIES} ${catkin_LIBRARIES} ${OpenCV_LIBS} ${CERES_LIBRARIES} gtsam)

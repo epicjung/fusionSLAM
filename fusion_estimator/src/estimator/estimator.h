@@ -9,29 +9,7 @@
 #include "../utility/parameters.h"
 #include "../featureExtractor/feature_extractor.h"
 #include "../featureTracker/feature_tracker.h"
-// #include "../mapOptimizer/map_optimizer.h"
-
-/*
-    * A point cloud type that has 6D pose info ([x,y,z,roll,pitch,yaw] intensity is time stamp)
-    */
-struct PointXYZIRPYT
-{
-    PCL_ADD_POINT4D
-    PCL_ADD_INTENSITY;                  // preferred way of adding a XYZ+padding
-    float roll;
-    float pitch;
-    float yaw;
-    double time;
-    EIGEN_MAKE_ALIGNED_OPERATOR_NEW   // make sure our new allocators are aligned
-} EIGEN_ALIGN16;                    // enforce SSE padding for correct memory alignment
-
-POINT_CLOUD_REGISTER_POINT_STRUCT (PointXYZIRPYT,
-                                   (float, x, x) (float, y, y)
-                                   (float, z, z) (float, intensity, intensity)
-                                   (float, roll, roll) (float, pitch, pitch) (float, yaw, yaw)
-                                   (double, time, time))
-
-typedef PointXYZIRPYT  PointTypePose;
+#include "../mapOptimizer/map_optimizer.h"
 
 const int WINDOW_SIZE = 10;
 const int queueLength = 2000; 
@@ -76,6 +54,14 @@ class Estimator : public ParamServer
 		void updateInitialGuess();
 		void extractSurroundingKeyFrames();
 		void downsampleCurrentScan();
+		void transformUpdate();
+		void constraintTransformation();
+		void LMOptimization();
+		void combineOptimizationCoeffs();
+		void surfOptimization();
+		void cornerOptimization();
+		void updatePointAssociateToMap();
+		void pointAssociateToMap();
 		void scan2MapOptimization();
 		bool isCloudKeyframe();
 		void addOdomFactor();
@@ -174,13 +160,10 @@ class Estimator : public ParamServer
 	    float odomIncreZ;
         Eigen::Affine3f transStartInverse;
 		Eigen::Affine3f transStart2Cam;
-    	Eigen::Affine3f increOdomFront;
-    	Eigen::Affine3f increOdomBack;
 		double lastOdomTime;
 
         // map optimization
-		std_msgs::Header cloudInfoInHeader;
-        double cloudInfoInTime;
+		MapOptimizer mapOptimizer;
 
         pcl::PointCloud<PointType>::Ptr laserCloudCorner; // corner feature set from odoOptimization
     	pcl::PointCloud<PointType>::Ptr laserCloudSurf; // surf feature set from odoOptimization
@@ -200,19 +183,7 @@ class Estimator : public ParamServer
 
     	// State
     	Vector3d latestXYZ, latestRPY, latestV, latestBa, latestBg;
-		gtsam::Pose3 prevPose_;
-		gtsam::Vector3 prevVel_; 
-		gtsam::NavState prevState_;
-		gtsam::imuBias::ConstantBias prevBias_;
-		gtsam::NavState prevOdom_;
-		gtsam::imuBias::ConstantBias prevOdomBias_;
     	
     	pcl::PointCloud<PointType>::Ptr cloudKeyPoses3D;
     	pcl::PointCloud<PointTypePose>::Ptr cloudKeyPoses6D;
-    	Vector3d camKeyPos[(WINDOW_SIZE + 1)];
-    	Vector3d camKeyVel[(WINDOW_SIZE + 1)];
-    	Matrix3d camKeyRot[(WINDOW_SIZE + 1)];
-    	Vector3d camKeyBas[(WINDOW_SIZE + 1)];
-    	Vector3d camKeyBgs[(WINDOW_SIZE + 1)];
-
 };

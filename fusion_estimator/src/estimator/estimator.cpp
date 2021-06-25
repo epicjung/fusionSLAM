@@ -93,22 +93,6 @@ void Estimator::allocateMemory()
 	resetLaserParameters();
 }
 
-void Estimator::resetOptimization()
-{
-    gtsam::ISAM2Params optParameters;
-    optParameters.relinearizeThreshold = 0.1;
-    optParameters.relinearizeSkip = 1;
-    optimizer = new ISAM2(optParameters);
-
-    gtsam::NonlinearFactorGraph newFactorGraph;
-    factorGraph = newFactorGraph;
-
-    gtsam::Values newInitialEstimate;
-    gtsam::Values initialEstimate = newInitialEstimate;
-    gtsam::Values newCurrentEstimate;
-    gtsam::Values isamCurrentEstimate = newCurrentEstimate;
-}
-
 void Estimator::resetImageParameters()
 {
 	inputImageCnt = 0;
@@ -556,142 +540,6 @@ void Estimator::cloudExtraction()
     pubCloud.publish(cloudInfoOut.cloud_deskewed);
 }
 
-void Estimator::updateInitialGuess()
-{
-	increOdomFront = trans2Affine3f(latestXYZ, latestRPY);
-
-	static Eigen::Affine3f lastImuTrans;
-
-	if (cloudKeyPoses3D->points.empty())
-	{
-		Vector3d initXYZ;
-		Vector3d initRPY;
-
-		initRPY = Vector3d(cloudInfoIn.imuRollInit, cloudInfoIn.imuPitchInit, cloudInfoIn.imuYawInit);
-		initXYZ.setZero();
-
-		latestXYZ = initXYZ;
-		latestRPY = initRPY;
-
-		lastImuTrans = trans2Affine3f(initXYZ, initRPY);
-		return;
-	}
-
-    // latestXYZ, latestRPY를 UPDATE
-}
-
-void Estimator::extractSurroundingKeyFrames()
-{
-	if (cloudKeyPoses3D->points.empty())
-		return;
-
-	// extractNearby();
-}
-
-void Estimator::downsampleCurrentScan()
-{
-    // Downsample cloud from current scan
-    laserCloudCornerDS->clear();
-    downSizeFilterCorner.setInputCloud(laserCloudCorner); 
-    downSizeFilterCorner.filter(*laserCloudCornerDS); // Down-sampled corner points
-    laserCloudCornerDSNum = laserCloudCornerDS->size();
-
-    laserCloudSurfDS->clear();
-    downSizeFilterSurf.setInputCloud(laserCloudSurf);
-    downSizeFilterSurf.filter(*laserCloudSurfDS); // Down-sampled surface points
-    laserCloudSurfDSNum = laserCloudSurfDS->size();	
-}
-
-void Estimator::scan2MapOptimization()
-{
-	if (cloudKeyPoses3D->points.empty())
-		return;
-}
-
-bool Estimator::isCloudKeyframe()
-{
-	if (cloudKeyPoses3D->points.empty())
-		return true;
-}
-
-// void Estimator::addVisualFactor()
-// {
-//     if (cloudKeyPoses3D->points.emtpy())
-//         return;
-    
-//     if (cloudInfoIn)
-// }
-
-void Estimator::addOdomFactor()
-{
-    if (cloudKeyPoses3D->points.empty())
-    {
-        // Add prior
-        noiseModel::Diagonal::shared_ptr priorNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-2, 1e-2, M_PI*M_PI, 1e8, 1e8, 1e8).finished()); // rad*rad, meter*meter
-        gtsam::Pose3 latestPose = trans2gtsamPose(latestXYZ, latestRPY);
-        factorGraph.add(PriorFactor<Pose3>(0, latestPose, priorNoise));
-        initialEstimate.insert(0, latestPose);
-    }
-    else
-    {
-        noiseModel::Diagonal::shared_ptr odometryNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-6, 1e-6, 1e-6, 1e-4, 1e-4, 1e-4).finished());
-        gtsam::Pose3 poseFrom = pclPointTogtsamPose3(cloudKeyPoses6D->points.back());
-        gtsam::Pose3 poseTo   = trans2gtsamPose(latestXYZ, latestRPY);
-        factorGraph.add(BetweenFactor<Pose3>(cloudKeyPoses3D->size()-1, cloudKeyPoses3D->size(), poseFrom.between(poseTo), odometryNoise));
-        initialEstimate.insert(cloudKeyPoses3D->size(), poseTo);
-    }
-}
-
-void Estimator::optimize()
-{
-    factorGraph.print("GTSAM Graph:\n");
-	optimizer->update(factorGraph, initialEstimate);
-	optimizer->update();
-	factorGraph.resize(0);
-	initialEstimate.clear();
-}
-
-void Estimator::saveKeyframe()
-{
-    PointType thisPose3D;
-    PointTypePose thisPose6D;
-    Pose3 latestEstimate;
-
-    isamCurrentEstimate = optimizer->calculateEstimate();
-    latestEstimate = isamCurrentEstimate.at<Pose3>(isamCurrentEstimate.size()-1); // get last value
-
-    thisPose3D.x = latestEstimate.translation().x();
-    thisPose3D.y = latestEstimate.translation().y();
-    thisPose3D.z = latestEstimate.translation().z();
-    thisPose3D.intensity = cloudKeyPoses3D->size(); // this can be used as index
-    cloudKeyPoses3D->push_back(thisPose3D); //cloudKeyPoses3D has xyz only
-
-    thisPose6D.x = thisPose3D.x;
-    thisPose6D.y = thisPose3D.y;
-    thisPose6D.z = thisPose3D.z;
-    thisPose6D.intensity = thisPose3D.intensity ; // this can be used as index
-    thisPose6D.roll  = latestEstimate.rotation().roll();
-    thisPose6D.pitch = latestEstimate.rotation().pitch();
-    thisPose6D.yaw   = latestEstimate.rotation().yaw();
-    thisPose6D.time = cloudInfoInTime;
-    cloudKeyPoses6D->push_back(thisPose6D); //cloudKeyPoses6D has xyz and rotations
-    
-    poseCovariance = optimizer->marginalCovariance(isamCurrentEstimate.size()-1);
-
-    // cout << "****************************************************" << endl;
-    // cout << "Pose covariance:" << endl;
-    // cout << isam->marginalCovariance(isamCurrentEstimate.size()-1) << endl << endl;
-
-    // save all the received edge and surf points
-    lastOdomTime = cloudInfoInTime;
-    pcl::PointCloud<PointType>::Ptr thisCornerKeyFrame(new pcl::PointCloud<PointType>());
-    pcl::PointCloud<PointType>::Ptr thisSurfKeyFrame(new pcl::PointCloud<PointType>());
-    pcl::copyPointCloud(*laserCloudCornerDS,  *thisCornerKeyFrame);
-    pcl::copyPointCloud(*laserCloudSurfDS,    *thisSurfKeyFrame);
-    cornerCloudKeyFrames.push_back(thisCornerKeyFrame);
-    surfCloudKeyFrames.push_back(thisSurfKeyFrame);
-
-}
 
 void Estimator::updateLatestOdometry()
 {
@@ -701,18 +549,6 @@ void Estimator::updateLatestOdometry()
 
     ROS_INFO("\033[1;33mLatestXYZ: %f, %f, %f \033[0m", latestXYZ.x(), latestXYZ.y(), latestXYZ.z());
     ROS_INFO("\033[1;33mLatestRPY: %f, %f, %f \033[0m", latestRPY.x(), latestRPY.y(), latestRPY.z());
-}
-
-void Estimator::publishOdometry()
-{
-    nav_msgs::Odometry latestOdom;
-    latestOdom.header.stamp = cloudInfoInHeader.stamp;
-    latestOdom.header.frame_id = mapFrame;
-    latestOdom.child_frame_id = imuFrame;
-    latestOdom.pose.pose.position.x = latestXYZ.x();
-    latestOdom.pose.pose.position.y = latestXYZ.y();
-    latestOdom.pose.pose.position.z = latestXYZ.z();
-    latestOdom.pose.pose.orientation = tf::createQuaternionMsgFromRollPitchYaw(latestRPY.x(), latestRPY.y(), latestRPY.z());
 }
 
 void Estimator::processMeasurements()
@@ -794,15 +630,12 @@ void Estimator::processMeasurements()
 
             cloudInfoIn = std::move(cloudInfoBuf.front());	
 
-            cloudInfoInHeader = cloudInfoIn.header;
-            cloudInfoInTime = Utility::ROS_TIME(&cloudInfoIn);
-
-            pcl::fromROSMsg(cloudInfoIn.cloud_corner, *laserCloudCorner);
-            pcl::fromROSMsg(cloudInfoIn.cloud_surface, *laserCloudSurf);
-
             mBuf.lock();
             cloudInfoBuf.pop();
             mBuf.unlock();
+
+            pcl::fromROSMsg(cloudInfoIn.cloud_corner, *laserCloudCorner);
+            pcl::fromROSMsg(cloudInfoIn.cloud_surface, *laserCloudSurf);
 
             cout << "Edge:" << laserCloudCorner->points.size() << endl;
             cout << "Surf:" << laserCloudSurf->points.size() << endl;
@@ -813,38 +646,29 @@ void Estimator::processMeasurements()
                 continue;
             }
 
+            // Map Optimization
             mProcess.lock();
+            
+            mapOptimizer.setCloudInfo(cloudInfoIn);
 
             static double timeLastProcessing = -1;
-            if (cloudInfoInTime - timeLastProcessing >= mappingProcessInterval)
+            if (mapOptimizer.timeLaserInfoCur - timeLastProcessing >= mappingProcessInterval)
             {
-                timeLastProcessing = cloudInfoInTime;
+                timeLastProcessing = mapOptimizer.timeLaserInfoCur;
 
-                updateInitialGuess();
+                mapOptimizer.updateInitialGuess();
 
-                cout<< "updateInitialGuess" << endl;
+                mapOptimizer.extractSurroundingKeyFrames();
 
-                extractSurroundingKeyFrames();
-                cout<< "extractSurroundingKeyFrames" << endl;
+                mapOptimizer.downsampleCurrentScan();
 
-                downsampleCurrentScan();
-                cout<< "downsampleCurrentScan" << endl;
+                mapOptimizer.scan2MapOptimization();
+                
+                mapOptimizer.saveKeyFramesAndFactor();
 
-                scan2MapOptimization();
-                cout<< "scan2MapOptimization" << endl;
-
-                addOdomFactor();
-
-                // addVisualFactor();
-
-                optimize();
-
-                saveKeyframe();
-
-                // Update latest
-                updateLatestOdometry();
+                // mapOptimizer::correctPoses();
+                // mapOptimizer::publishOdometry();
             }
-
             mProcess.unlock();
         }
 		else if (!featureBuf.empty())
@@ -1051,11 +875,6 @@ void Estimator::odometryHandler(const nav_msgs::Odometry::ConstPtr &odomMsg)
 	odomBuf.push_back(*odomMsg);
     printf("OdomBuf size: %d\n", odomBuf.size());
 	mBuf.unlock();
-}
-
-Affine3f Estimator::trans2Affine3f(Vector3d XYZ, Vector3d RPY)
-{
-    return pcl::getTransformation(XYZ.x(), XYZ.y(), XYZ.z(), RPY.x(), RPY.y(), RPY.z());
 }
 
 gtsam::Pose3 Estimator::pclPointTogtsamPose3(PointTypePose thisPoint)
