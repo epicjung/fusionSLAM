@@ -6,7 +6,7 @@ fusion:
   odomTopic: "/odometry"
 
   # frames
-  lidarFrame: "lidar"
+  lidarFrame: "base_link"
   imuFrame: "base_link"
   odometryFrame: "odom"
   camFrame: "cam"

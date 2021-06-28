@@ -78,10 +78,11 @@ class VisualFeature : public ParamServer
             {
                 int id = it->first;
                 Eigen::Matrix<double, 7, 1> xyz_uv_vel = it->second[0].second;
-                featuresMsg.points[cnt].x = xyz_uv_vel(3, 1);
-                featuresMsg.points[cnt].y = xyz_uv_vel(4, 1);
-                featuresMsg.channels[0].values[cnt] = id;
+                featuresMsg.points[cnt].x = float(xyz_uv_vel(3, 0));
+                featuresMsg.points[cnt].y = float(xyz_uv_vel(4, 0));
+                featuresMsg.channels[0].values[cnt] = float(id);
                 cnt++;
+                // printf("time: %f, id: %d, uv: %f, %f\n", ROS_TIME(imgMsg), id, xyz_uv_vel(3, 0), xyz_uv_vel(4, 0));
             }
             pubUV.publish(featuresMsg);
         }

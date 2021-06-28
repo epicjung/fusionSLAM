@@ -1,5 +1,6 @@
 # Cloud Info
 Header header 
+bool isCloud
 
 int32[] startRingIndex
 int32[] endRingIndex

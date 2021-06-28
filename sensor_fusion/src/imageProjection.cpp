@@ -11,7 +11,6 @@ private:
     std::mutex imgLock;
 
     ros::Subscriber subLaserCloud;
-    ros::Publisher  pubLaserCloud;
     
     ros::Publisher pubExtractedCloud;
     ros::Publisher pubLaserCloudInfo;
@@ -22,7 +21,8 @@ private:
     ros::Subscriber subOdom;
     std::deque<nav_msgs::Odometry> odomQueue;
 
-    std::deque<sensor_msgs::PointCloud2> uvQueue;
+    ros::Subscriber subUV;
+    std::deque<pair<double, map<uint, Eigen::Vector2d>>> uvQueue;
 
     std::deque<sensor_msgs::PointCloud2> cloudQueue;
     sensor_msgs::PointCloud2 currentCloudMsg;
@@ -49,13 +49,18 @@ private:
     float odomIncreY;
     float odomIncreZ;
 
-    bool imgDeskewFlag;
 
     sensor_fusion::cloud_info cloudInfo;
     double timeScanCur;
     double timeScanEnd;
     std_msgs::Header cloudHeader;
 
+    // Image deskewing
+    pair<double, map<uint, Eigen::Vector2d>> deskewImage;
+    double imgDeskewTime;
+    bool imgDeskewFlag;
+    int imuPointerImg;
+    Eigen::Affine3f transStart2Cam;
 
 public:
     ImageProjection():
@@ -64,7 +69,7 @@ public:
         subImu        = nh.subscribe<sensor_msgs::Imu>(imuTopic, 2000, &ImageProjection::imuHandler, this, ros::TransportHints().tcpNoDelay());
         subOdom       = nh.subscribe<nav_msgs::Odometry>(odomTopic+"_incremental", 2000, &ImageProjection::odometryHandler, this, ros::TransportHints().tcpNoDelay());
         subLaserCloud = nh.subscribe<sensor_msgs::PointCloud2>(cloudTopic, 5, &ImageProjection::cloudHandler, this, ros::TransportHints().tcpNoDelay());
-
+        subUV         = nh.subscribe<sensor_msgs::PointCloud>("tracked_feature", 100, &ImageProjection::uvHandler, this, ros::TransportHints().tcpNoDelay());
         pubExtractedCloud = nh.advertise<sensor_msgs::PointCloud2> ("lio_sam/deskew/cloud_deskewed", 1);
         pubLaserCloudInfo = nh.advertise<sensor_fusion::cloud_info> ("lio_sam/deskew/cloud_info", 1);
 
@@ -103,6 +108,7 @@ public:
         firstPointFlag = true;
         odomDeskewFlag = false;
         imgDeskewFlag = false;
+        imgDeskewTime = -1;
 
         for (int i = 0; i < queueLength; ++i)
         {
@@ -145,10 +151,10 @@ public:
         std::lock_guard<std::mutex> lock2(odoLock);
         odomQueue.push_back(*odometryMsg);
     }
-
             
     void uvHandler(const sensor_msgs::PointCloudConstPtr& msg)
     {
+        lock_guard<mutex> lock3(imgLock);
         // skip first keyframes (to-do)
 
         // feature measurements
@@ -156,17 +162,17 @@ public:
         std::vector<Eigen::Vector2d> uvs;
 
         // loop through features and append (to-do: vector to queue)
+        map<uint, Eigen::Vector2d> feature;
         for(size_t i = 0; i < msg->points.size(); ++i)
         {
-            int v = msg->channels[0].values[i] + 0.5;
-            int id = v / 1;
-            ids.push_back((uint)id);
             Eigen::Vector2d uv;
+            int id = msg->channels[0].values[i];
             uv << msg->points[i].x, msg->points[i].y;
-            uvs.push_back(uv);
+            feature[uint(id)] = uv;
         }
+        uvQueue.push_back(make_pair(ROS_TIME(msg), feature));
     }
-           
+       
 
     void cloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
     {
@@ -176,11 +182,19 @@ public:
             return;
         }
 
+        if (!getFirstImage(timeScanCur, timeScanEnd))
+        { 
+            printf("Image Not available\n");
+        }
+
         if (!deskewInfo())
         {
             ROS_WARN("imageProjection: deskew failure");
             return;
         }
+
+        // temp
+        imgDeskewFlag = imuPointerImg > 0 ? true : false; 
         
         projectPointCloud();
 
@@ -197,6 +211,20 @@ public:
         cloudQueue.push_back(*laserCloudMsg);
         if (cloudQueue.size() <= 2)
             return false;
+
+        // abandon pointcloud if its oldest message came earlier than that of imu
+        if (!imuQueue.empty())
+        {
+            printf("cloud front: %f\n", cloudQueue.front().header.stamp.toSec());
+            printf("imu front: %f\n", imuQueue.front().header.stamp.toSec());
+            if (ROS_TIME(&cloudQueue.front()) < ROS_TIME(&imuQueue.front()))
+            {
+                cloudQueue.pop_front();
+                return false;
+            }
+        } else {
+            return false;
+        }
 
         // convert cloud
         currentCloudMsg = std::move(cloudQueue.front());
@@ -282,6 +310,31 @@ public:
         return true;
     }
 
+    bool getFirstImage(double start, double end)
+    {
+        lock_guard<mutex> lock3(imgLock);
+        
+        // pop old features
+        while (uvQueue.front().first < start)
+        {
+            uvQueue.pop_front();
+        }
+
+        // get first feature
+        if (!uvQueue.empty())
+        {
+            if (uvQueue.front().first < end)
+            {
+                imgDeskewTime = uvQueue.front().first;
+                deskewImage = uvQueue.front();
+                printf("First image at time: %f\n", uvQueue.front().first);
+                return true;
+            }
+        }
+        imgDeskewTime = -1;
+        return false;
+    }
+
     //imuRotX, imuRotY, imuRotZ, initial guess (startOdomMsg), endOdomMsg, odomIncreX, odomIncreY, odomIncreZ, rollIncre, pitchIncre, yawIncre 계산 
     bool deskewInfo()
     {
@@ -322,6 +375,7 @@ public:
             return;
 
         imuPointerCur = 0;
+        imuPointerImg = 0;
 
         for (int i = 0; i < (int)imuQueue.size(); ++i)
         {
@@ -343,6 +397,11 @@ public:
                 imuTime[0] = currentImuTime;
                 ++imuPointerCur;
                 continue;
+            }
+
+            if (imgDeskewTime > 0 && currentImuTime > imgDeskewTime)
+            {
+                imuPointerImg = imuPointerCur;
             }
 
             // get angular velocity
@@ -385,7 +444,6 @@ public:
             ROS_WARN("imageProjection: odomQueue empty");
             return;
         }
-
 
         if (odomQueue.front().header.stamp.toSec() > timeScanCur)
         {
@@ -520,16 +578,23 @@ public:
         float posXCur, posYCur, posZCur;
         findPosition(relTime, &posXCur, &posYCur, &posZCur);
 
-
         if (firstPointFlag == true)
         {
             transStartInverse = (pcl::getTransformation(posXCur, posYCur, posZCur, rotXCur, rotYCur, rotZCur)).inverse();
             firstPointFlag = false;
         }
-
-        // transform points to start
-        Eigen::Affine3f transFinal = pcl::getTransformation(posXCur, posYCur, posZCur, rotXCur, rotYCur, rotZCur);
-        Eigen::Affine3f transBt = transStartInverse * transFinal;
+        
+        Eigen::Affine3f transCur = pcl::getTransformation(posXCur, posYCur, posZCur, rotXCur, rotYCur, rotZCur);
+        Eigen::Affine3f transBt;
+        
+        if (imgDeskewFlag) // transform points to camera
+        {
+            transBt = transStart2Cam.inverse() * transCur;
+            cloudInfo.isCloud = false;
+        } else { // transform poitns to start
+            transBt = transStartInverse * transCur;
+            cloudInfo.isCloud = true;
+        }
 
         PointType newPoint;
         newPoint.x = transBt(0,0) * point->x + transBt(0,1) * point->y + transBt(0,2) * point->z + transBt(0,3);
@@ -542,6 +607,47 @@ public:
 
     void projectPointCloud()
     {
+        // get transformation from timeScanCur to camera pose
+        if (imgDeskewFlag)
+        {
+            int prevPointer = imuPointerImg - 1;
+            double ratioFront = (imgDeskewTime - imuTime[prevPointer]) / (imuTime[imuPointerImg] - imuTime[prevPointer]);
+            double ratioBack = (imuTime[imuPointerImg] - imgDeskewTime) / (imuTime[imuPointerImg] - imuTime[prevPointer]);
+            float rotXCur = imuRotX[imuPointerImg] * ratioFront + imuRotX[prevPointer] * ratioBack;
+            float rotYCur = imuRotY[imuPointerImg] * ratioFront + imuRotY[prevPointer] * ratioBack;
+            float rotZCur = imuRotZ[imuPointerImg] * ratioFront + imuRotZ[prevPointer] * ratioBack;
+            float posXCur, posYCur, posZCur;
+            double relTime = imgDeskewTime - timeScanCur;
+            findPosition(relTime, &posXCur, &posYCur, &posZCur);
+
+            ROS_WARN("Image Deskewing...");
+            // debug
+            printf("imuPointerImg: %d\n", imuPointerImg);
+            printf("posX: %f, posY: %f, posZ: %f\n", posXCur, posYCur, posZCur);
+            printf("rotX: %f, rotY: %f, rotZ: %f\n", rotXCur, rotYCur, rotZCur);
+            
+            transStart2Cam = pcl::getTransformation(posXCur, posYCur, posZCur, rotXCur, rotYCur, rotZCur);
+
+            // Transform initialGuess to Camera 
+            Eigen::Affine3f transWorld2Start = pcl::getTransformation(cloudInfo.initialGuessX, cloudInfo.initialGuessY, cloudInfo.initialGuessZ,
+                                                            cloudInfo.initialGuessRoll, cloudInfo.initialGuessPitch, cloudInfo.initialGuessYaw);
+            Eigen::Affine3f transWorld2Cam = transWorld2Start * transStart2Cam;
+            float camPosX, camPosY, camPosZ, camRoll, camPitch, camYaw;
+            pcl::getTranslationAndEulerAngles(transWorld2Cam, camPosX, camPosY, camPosZ, camRoll, camPitch, camYaw);
+            printf("camPosX: %f, camPosY: %f, camPosZ: %f\n", camPosX, camPosY, camPosZ);
+            printf("camRoll: %f, camPitch: %f, camYaw: %f\n", camRoll, rotYCur, rotZCur);
+            cloudInfo.initialGuessX = camPosX;
+            cloudInfo.initialGuessY = camPosY;
+            cloudInfo.initialGuessZ = camPosZ;
+            cloudInfo.initialGuessRoll  = camRoll;
+            cloudInfo.initialGuessPitch = camPitch;
+            cloudInfo.initialGuessYaw   = camYaw;
+
+            // Change timestamp for the pointcloud
+            ros::Time rosTime(imgDeskewTime);
+            cloudInfo.header.stamp = rosTime;
+            cloudInfo.header.frame_id = imuFrame;
+        }
 
         int cloudSize = laserCloudIn->points.size();
 
@@ -625,7 +731,7 @@ public:
 
 int main(int argc, char** argv)
 {
-    ros::init(argc, argv, "lio_sam");
+    ros::init(argc, argv, "sensor_fusion");
 
     ImageProjection IP;
     

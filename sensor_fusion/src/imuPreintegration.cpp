@@ -128,7 +128,6 @@ public:
                 break;
         }
 
-        ROS_INFO("VINS Odom queue size: %d\n", imuOdomQueue.size());
         // Front: Imu odometry queue에서 lidar odometry보다 나중에 들어왔고 lidar odometry 들어온 시간과 젤 가까운 것 
         // Back: Imu odometry queue에서 lidar odometry보다 나중에 들어왔고 가장 최근 것
         // 두 imu odometry의 Transformation을 Lidar odometry에 곱하여 최근 Imu 시간까지 떙겨옴 
@@ -523,6 +522,8 @@ public:
         odometry.header.frame_id = odometryFrame;
         odometry.child_frame_id = "odom_imu";
 
+        // printf("First OPT imuPreintegration imu timestamp: %f\n", thisImu.header.stamp.toSec());
+
         // transform imu pose to ldiar
         gtsam::Pose3 imuPose = gtsam::Pose3(currentState.quaternion(), currentState.position());
         //imuPose 자체는 imu 값을 lidar 기준으로 Rotation만 시켜서 얻은 pose이기 때문에 translation (imu2Lidar)을 곱해줘야 함
@@ -551,7 +552,7 @@ public:
 
 int main(int argc, char** argv)
 {
-    ros::init(argc, argv, "roboat_loam");
+    ros::init(argc, argv, "sensor_fusion");
     
     IMUPreintegration ImuP;
 
