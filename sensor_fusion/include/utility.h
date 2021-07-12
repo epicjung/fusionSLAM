@@ -9,6 +9,7 @@
 
 #include "sensor_fusion/cloud_info.h"
 #include "sensor_fusion/save_map.h"
+#include "tic_toc.h"
 
 #include <std_msgs/Header.h>
 #include <std_msgs/Float64MultiArray.h>
@@ -20,8 +21,10 @@
 #include <visualization_msgs/Marker.h>
 #include <visualization_msgs/MarkerArray.h>
 
-
 #include <opencv/cv.h>
+#include <opencv2/opencv.hpp>
+#include <cv_bridge/cv_bridge.h>
+#include <opencv2/highgui/highgui.hpp>
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -149,6 +152,9 @@ class ParamServer
 		string cameraFrame;
         string odometryFrame;
 
+		// Feature
+		float DEPTH_ASSOCIATE_THRES;
+
 	    // GPS Settings
 	    bool useImuHeadingInitialization;
 	    bool useGpsElevation;
@@ -178,12 +184,15 @@ class ParamServer
 	    vector<double> extRPYV;
 	    vector<double> extTransV;
 	    vector<double> imu2gpsTransV;
-	    Eigen::Matrix3d extRot;
-	    Eigen::Matrix3d extRPY;
-	    Eigen::Vector3d extTrans;
+	    Eigen::Matrix3d rotLidar2Imu;
+	    Eigen::Matrix3d rpyLidar2Imu;
+	    Eigen::Vector3d transLidar2Imu;
 	    Eigen::Vector3d imu2gpsTrans;
 	    Eigen::Quaterniond extQRPY;
 
+		// Transformation
+		Eigen::Affine3f transLidar2Cam;
+		
 	    // LOAM
 	    float edgeThreshold;
 	    float surfThreshold;
@@ -257,6 +266,8 @@ class ParamServer
 		vector<double> extImuCamTrans;
 		vector<Eigen::Matrix3d> RIC;
 		vector<Eigen::Vector3d> TIC;
+		Eigen::Matrix3d rotImu2Cam;
+	    Eigen::Vector3d transImu2Cam;
 
 		int ROW, COL;
 		int NUM_OF_CAM;
@@ -272,7 +283,6 @@ class ParamServer
 		int SHOW_TRACK;
 		int FLOW_BACK;
 
-
 		ParamServer()
 		{
 			nh.param<std::string>("fusion/cloudTopic", cloudTopic, "points");
@@ -286,9 +296,13 @@ class ParamServer
             nh.param<std::string>("fusion/odometryFrame", odometryFrame, "odom");
 
 	        nh.param<int>("fusion/estimateExtrinsic", ESTIMATE_EXTRINSIC, 1);
-	        nh.param<vector<double>>("fusion/imuCamRotation/data", extImuCamRot, vector<double>());
-	        nh.param<vector<double>>("fusion/imuCamTranslation/data", extImuCamTrans, vector<double>());
+			nh.param<float>("fusion/depthAssociateThres", DEPTH_ASSOCIATE_THRES, 1.0);
+	        nh.param<vector<double>>("fusion/camera/rotImu2Cam", extImuCamRot, vector<double>());
+	        nh.param<vector<double>>("fusion/camera/transImu2Cam", extImuCamTrans, vector<double>());
 	        
+			rotImu2Cam = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extImuCamRot.data(), 3, 3);
+	        transImu2Cam = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extImuCamTrans.data(), 3, 1);
+
 		    if (ESTIMATE_EXTRINSIC == 2)
 		    {
 		        ROS_WARN("have no prior about extrinsic param, calibrate extrinsic param");
@@ -337,15 +351,13 @@ class ParamServer
 
 	        nh.param<vector<double>>("fusion/imu/imu2gpsTrans", imu2gpsTransV, vector<double>());
 
-
-	        nh.param<vector<double>>("fusion/laser/extrinsicRot", extRotV, vector<double>());
+	        nh.param<vector<double>>("fusion/laser/rotLidar2Imu", extRotV, vector<double>());
 	        nh.param<vector<double>>("fusion/laser/extrinsicRPY", extRPYV, vector<double>());
-	        nh.param<vector<double>>("fusion/laser/extrinsicTrans", extTransV, vector<double>());
-	        extRot = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extRotV.data(), 3, 3);
-	        extRPY = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extRPYV.data(), 3, 3);
-	        extTrans = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extTransV.data(), 3, 1);
+	        nh.param<vector<double>>("fusion/laser/transLidar2Imu", extTransV, vector<double>());
+	        rotLidar2Imu = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extRotV.data(), 3, 3);
+	        // extRPY = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extRPYV.data(), 3, 3);
+	        transLidar2Imu = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extTransV.data(), 3, 1);
 	        imu2gpsTrans = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(imu2gpsTransV.data(), 3, 1);
-	        extQRPY = Eigen::Quaterniond(extRPY);
 
 	        nh.param<float>("fusion/laser/edgeThreshold", edgeThreshold, 0.1);
 	        nh.param<float>("fusion/laser/surfThreshold", surfThreshold, 0.1);
@@ -407,10 +419,21 @@ class ParamServer
 	        nh.param<int>("fusion/camera/flowBack", FLOW_BACK, 1);
 
 	        printf("Parameters have been loaded\n");
+
+			// Lidar-to-cam transformation
+			Eigen::Vector3d ypr = rotLidar2Imu.eulerAngles(2, 1, 0);
+			Eigen::Affine3f transL2I = pcl::getTransformation(transLidar2Imu.x(), transLidar2Imu.y(), transLidar2Imu.z(), ypr.z(), ypr.y(), ypr.x());
+			ypr = rotImu2Cam.eulerAngles(2, 1, 0);
+			Eigen::Affine3f transI2C = pcl::getTransformation(transImu2Cam.x(), transImu2Cam.y(), transImu2Cam.z(), ypr.z(), ypr.y(), ypr.x());
+			transLidar2Cam = transL2I * transI2C;
+
+			// test
+			cout << transLidar2Cam.matrix() << endl;
 		}
 
         sensor_msgs::Imu imuConverter(const sensor_msgs::Imu& imu_in)
         {
+			Eigen::Matrix3d extRot = rotLidar2Imu;
             sensor_msgs::Imu imu_out = imu_in;
             // rotate acceleration
             Eigen::Vector3d acc(imu_in.linear_acceleration.x, imu_in.linear_acceleration.y, imu_in.linear_acceleration.z);
@@ -425,6 +448,7 @@ class ParamServer
             imu_out.angular_velocity.y = gyr.y();
             imu_out.angular_velocity.z = gyr.z();
             // rotate roll pitch yaw
+			extQRPY = Eigen::Quaterniond(extRot.inverse());
             Eigen::Quaterniond q_from(imu_in.orientation.w, imu_in.orientation.x, imu_in.orientation.y, imu_in.orientation.z);
             Eigen::Quaterniond q_final = q_from * extQRPY;
             imu_out.orientation.x = q_final.x();
@@ -501,6 +525,11 @@ float pointDistance(PointType p)
 float pointDistance(PointType p1, PointType p2)
 {
     return sqrt((p1.x-p2.x)*(p1.x-p2.x) + (p1.y-p2.y)*(p1.y-p2.y) + (p1.z-p2.z)*(p1.z-p2.z));
+}
+
+double vectorDistance(Vector2d v1, Vector2d v2)
+{
+	return sqrt((v1.x()-v2.x())*(v1.x()-v2.x()) + (v1.y()-v2.y())*(v1.y()-v2.y()));
 }
 
 #endif

@@ -22,6 +22,10 @@ class VisualFeature : public ParamServer
         ros::Publisher pubUV;
 
     public:
+        std::mutex imgLock;
+        std::mutex processLock;
+        std::thread processThread;
+
         int row, col;
         cv::Mat imTrack;
         cv::Mat mask;
@@ -38,6 +42,7 @@ class VisualFeature : public ParamServer
         map<int, cv::Point2f> cur_un_pts_map, prev_un_pts_map;
         map<int, cv::Point2f> cur_un_right_pts_map, prev_un_right_pts_map;
         map<int, cv::Point2f> prevLeftPtsMap;
+        deque<sensor_msgs::Image> imgQueue;
         vector<camodocal::CameraPtr> m_camera;
         double cur_time;
         double prev_time;
@@ -47,58 +52,91 @@ class VisualFeature : public ParamServer
 
         VisualFeature()
         {
-            subImg        = nh.subscribe<sensor_msgs::Image>(imgTopic, 100, &VisualFeature::imgHandler, this, ros::TransportHints().tcpNoDelay());
-            pubUV         = nh.advertise<sensor_msgs::PointCloud>("tracked_feature", 100);
+            subImg        = nh.subscribe<sensor_msgs::Image>(imgTopic, 1000, &VisualFeature::imgHandler, this, ros::TransportHints().tcpNoDelay());
+            pubUV         = nh.advertise<sensor_msgs::PointCloud>("tracked_feature", 1000);
             stereo_cam = 0;
             n_id = 0;
             hasPrediction = false;
         };
 
-        ~VisualFeature(){};
+        ~VisualFeature()
+        {
+            processThread.join();
+        }
+
+        void processImage()
+        {
+            while(1)
+            {
+                // ROS_INFO("B -- imgQueue size: %d\n", imgQueue.size());
+
+                if (!imgQueue.empty())
+                {
+                    sensor_msgs::Image rosImage = imgQueue.front();
+                    imgLock.lock();
+                    imgQueue.pop_front();
+                    imgLock.unlock();
+                    cv::Mat thisImage = getImageFromMsg(rosImage);
+
+                    map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> featureFrame;
+                    // 스트레오 처리 필요
+                    
+                    featureFrame = trackImage(ROS_TIME(&rosImage), thisImage);
+                    
+                    int numPoints = featureFrame.size();  
+
+                    sensor_msgs::PointCloud featuresMsg;
+                    featuresMsg.header.stamp = rosImage.header.stamp;
+                    featuresMsg.header.frame_id = "image";
+                    featuresMsg.points.resize(numPoints);
+                    featuresMsg.channels.resize(2);
+                    featuresMsg.channels[0].name = "feature_id";
+                    featuresMsg.channels[0].values.resize(numPoints);
+                    featuresMsg.channels[1].name = "associated";
+                    featuresMsg.channels[1].values.resize(numPoints);
+                    int cnt = 0;
+                    for(auto it = featureFrame.begin(); it != featureFrame.end(); ++it)
+                    {
+                        int id = it->first;
+                        Eigen::Matrix<double, 7, 1> xyz_uv_vel = it->second[0].second;
+                        featuresMsg.points[cnt].x = float(xyz_uv_vel(3, 0));
+                        featuresMsg.points[cnt].y = float(xyz_uv_vel(4, 0));
+                        featuresMsg.channels[0].values[cnt] = float(id);
+                        featuresMsg.channels[1].values[cnt] = 0.0;
+                        cnt++;
+                    }
+                    pubUV.publish(featuresMsg);
+                }
+                else
+                {
+                    
+                }
+                std::chrono::milliseconds dura(2);
+                std::this_thread::sleep_for(dura);
+            }
+        }
 
         void imgHandler(const sensor_msgs::Image::ConstPtr& imgMsg)
         {
-            cv::Mat thisImage = getImageFromMsg(imgMsg);
-
-            map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> featureFrame;
-            // 스트레오 처리 필요
-            featureFrame = trackImage(ROS_TIME(imgMsg), thisImage);
-            int numPoints = featureFrame.size();  
-
-            sensor_msgs::PointCloud featuresMsg;
-            featuresMsg.header.stamp = imgMsg->header.stamp;
-            featuresMsg.header.frame_id = "image";
-            featuresMsg.points.resize(numPoints);
-            featuresMsg.channels.resize(1);
-            featuresMsg.channels[0].name = "feature_id";
-            featuresMsg.channels[0].values.resize(numPoints);
-
-            int cnt = 0;
-            for(auto it = featureFrame.begin(); it != featureFrame.end(); ++it)
-            {
-                int id = it->first;
-                Eigen::Matrix<double, 7, 1> xyz_uv_vel = it->second[0].second;
-                featuresMsg.points[cnt].x = float(xyz_uv_vel(3, 0));
-                featuresMsg.points[cnt].y = float(xyz_uv_vel(4, 0));
-                featuresMsg.channels[0].values[cnt] = float(id);
-                cnt++;
-                // printf("time: %f, id: %d, uv: %f, %f\n", ROS_TIME(imgMsg), id, xyz_uv_vel(3, 0), xyz_uv_vel(4, 0));
-            }
-            pubUV.publish(featuresMsg);
+            imgLock.lock();
+            imgQueue.push_back(*imgMsg);
+            imgLock.unlock();
+            // printf("img height: %d\n", imgMsg->height);
+            // printf("img_width: %d\n", imgMsg->width);
         }
    
-        cv::Mat getImageFromMsg(const sensor_msgs::ImageConstPtr &img_msg)
+        cv::Mat getImageFromMsg(const sensor_msgs::Image img_msg)
         {
             cv_bridge::CvImageConstPtr ptr;
-            if (img_msg->encoding == "8UC1")
+            if (img_msg.encoding == "8UC1")
             {
                 sensor_msgs::Image img;
-                img.header = img_msg->header;
-                img.height = img_msg->height;
-                img.width = img_msg->width;
-                img.is_bigendian = img_msg->is_bigendian;
-                img.step = img_msg->step;
-                img.data = img_msg->data;
+                img.header = img_msg.header;
+                img.height = img_msg.height;
+                img.width = img_msg.width;
+                img.is_bigendian = img_msg.is_bigendian;
+                img.step = img_msg.step;
+                img.data = img_msg.data;
                 img.encoding = "mono8";
                 ptr = cv_bridge::toCvCopy(img, sensor_msgs::image_encodings::MONO8);
             }
@@ -141,7 +179,7 @@ class VisualFeature : public ParamServer
             }
         }
 
-        map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> trackImage(double _cur_time, const cv::Mat &_img, const cv::Mat &_img1=cv::Mat())
+        map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> trackImage(double _cur_time, const cv::Mat &_img, const cv::Mat &_img1 = cv::Mat())
         {
             TicToc t_r;
             cur_time = _cur_time;
@@ -639,6 +677,9 @@ class VisualFeature : public ParamServer
         void setParameter()
         {
             readIntrinsicParameter(CAM_NAMES);
+            processLock.lock();
+            processThread = std::thread(&VisualFeature::processImage, this);
+            processLock.unlock();
         }
 };
 
@@ -652,8 +693,10 @@ int main(int argc, char** argv)
 
     ROS_INFO("\033[1;32m----> Visual Feature Tracker Started.\033[0m");
     
-    ros::MultiThreadedSpinner spinner(2);
-    spinner.spin();
+    // ros::MultiThreadedSpinner spinner(4);
+    // spinner.spin();
     
+    ros::spin();
+
     return 0;
 }

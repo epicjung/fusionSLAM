@@ -63,6 +63,7 @@ int main(int argc, char** argv) {
         if (batch(pm.buf.data(), ls)) {
             auto h = std::find_if(
                 ls.headers.begin(), ls.headers.end(), [](const auto& h) {
+		    //std::cout<< std::chrono::duration_cast<std::chrono::seconds>(h.timestamp).count() <<std::endl;
                     return h.timestamp != std::chrono::nanoseconds{0};
                 });
             if (h != ls.headers.end()) {

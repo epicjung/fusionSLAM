@@ -2,7 +2,8 @@ fusion:
   # Topics
   cloudTopic: "/os_cloud_node/points"
   imuTopic: "/imu/data"
-  imgTopic: "/camera/image"  
+  # imgTopic: "/camera/image"
+  imgTopic: "/image_proc_resize/image"  
   odomTopic: "/odometry"
 
   # frames
@@ -15,18 +16,7 @@ fusion:
   # Extrinsic parameter between IMU and Camera.
   estimateExtrinsic: 0   # 0  Have an accurate extrinsic parameters. We will trust the following imu^R_cam, imu^T_cam, don't change it.
                           # 1  Have an initial guess about extrinsic parameters. We will optimize around your initial guess.
-  imuCamRotation: 
-      rows: 3
-      cols: 3
-      dt: d
-      data: [0, 0, 1,
-           -1, 0, 0,
-           0, -1, 0]   
-  imuCamTranslation: 
-      rows: 3
-      cols: 1
-      dt: d
-      data: [0.4681, 0.0, 0.2539] 
+  depthAssociateThres: 2.0
 
   imu:
     # IMU Settings
@@ -40,9 +30,22 @@ fusion:
     imu2gpsTrans: [0.144, -0.161, 0.769]
 
   camera:
-    calib: "cam0_pinhole.yaml"
-    imageWidth: 1920
-    imageHeight: 1080
+    rotImu2Cam: [0, 0, 1,
+              -1, 0, 0,
+              0, -1, 0]   
+    transImu2Cam: [0.4681, 0.0, 0.2539]
+    # transImu2Cam: [0.4681, 0.0, 0.3039] 
+    # calib: "cam0_pinhole.yaml"
+    # imageWidth: 1920
+    # imageHeight: 1080
+    # focalLength: 460.0
+    # windowSize: 10
+    # numOfF: 1000
+    # initDepth: 5.0
+
+    calib: "cam0_resize.yaml"
+    imageWidth: 480
+    imageHeight: 270
     focalLength: 460.0
     windowSize: 10
     numOfF: 1000
@@ -55,7 +58,7 @@ fusion:
 
     #feature traker paprameters
     maxCnt: 150            # max feature number in feature tracking
-    minDist: 30            # min distance between two features 
+    minDist: 10            # min distance between two features 
     FThreshold: 1.0        # ransac threshold (pixel)
     showTrack: 1           # publish tracking image as topic
     flowBack: 1            # perform forward and backward optical flow to improve feature tracking accuracy
@@ -85,18 +88,12 @@ fusion:
     lidarMaxRange: 1000.0                       # default: 1000.0, maximum lidar range to be used
 
     # Extrinsics (lidar -> IMU)
-    extrinsicTrans: [0.3787, 0.0, -0.6945]
-    extrinsicRot: [-1, 0, 0,
-                  0, -1, 0,
+    transLidar2Imu: [-0.3787, 0.0, -0.6945]
+    rotLidar2Imu: [1, 0, 0,
+                  0, 1, 0,
                   0, 0, 1]
-    extrinsicRPY: [1,  0, 0,
-                   0, 1, 0,
-                    0, 0, 1]
-    # extrinsicRot: [1, 0, 0,
-    #                 0, 1, 0,
-    #                 0, 0, 1]
-    # extrinsicRPY: [1, 0, 0,
-    #                 0, 1, 0,
+    # rpyLidar2Imu: [1,  0, 0,
+    #                0, 1, 0,
     #                 0, 0, 1]
 
     # LOAM feature threshold

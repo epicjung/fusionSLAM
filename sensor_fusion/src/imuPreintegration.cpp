@@ -226,8 +226,8 @@ public:
 
     int key = 1;
 
-    gtsam::Pose3 imu2Lidar = gtsam::Pose3(gtsam::Rot3(1, 0, 0, 0), gtsam::Point3(-extTrans.x(), -extTrans.y(), -extTrans.z()));
-    gtsam::Pose3 lidar2Imu = gtsam::Pose3(gtsam::Rot3(1, 0, 0, 0), gtsam::Point3(extTrans.x(), extTrans.y(), extTrans.z()));
+    gtsam::Pose3 imu2Lidar = gtsam::Pose3(gtsam::Rot3(1, 0, 0, 0), gtsam::Point3(-transLidar2Imu.x(), -transLidar2Imu.y(), -transLidar2Imu.z()));
+    gtsam::Pose3 lidar2Imu = gtsam::Pose3(gtsam::Rot3(1, 0, 0, 0), gtsam::Point3(transLidar2Imu.x(), transLidar2Imu.y(), transLidar2Imu.z()));
 
     IMUPreintegration()
     {
@@ -295,6 +295,8 @@ public:
         float r_z = odomMsg->pose.pose.orientation.z;
         float r_w = odomMsg->pose.pose.orientation.w;
         bool degenerate = (int)odomMsg->pose.covariance[0] == 1 ? true : false;
+        printf("<<<<Imu Preint >>>>\n");
+        printf("Lidar Pose: %f, %f, %f,,,,, %f, %f, %f, %f,\n", p_x, p_y, p_z, r_x, r_y, r_z, r_w);
         gtsam::Pose3 lidarPose = gtsam::Pose3(gtsam::Rot3::Quaternion(r_w, r_x, r_y, r_z), gtsam::Point3(p_x, p_y, p_z));
 
         // 0. initialize system
@@ -402,6 +404,7 @@ public:
                          gtsam::noiseModel::Diagonal::Sigmas(sqrt(imuIntegratorOpt_->deltaTij()) * noiseModelBetweenBias)));
         // add pose factor
         gtsam::Pose3 curPose = lidarPose.compose(lidar2Imu); //imu pose 
+        printf("Cur imu pose: %f, %f, %f\n", curPose.translation().x(), curPose.translation().y(), curPose.translation().z());
         gtsam::PriorFactor<gtsam::Pose3> pose_factor(X(key), curPose, degenerate ? correctionNoise2 : correctionNoise);
         graphFactors.add(pose_factor);
         // insert predicted values
@@ -485,6 +488,8 @@ public:
     void imuHandler(const sensor_msgs::Imu::ConstPtr& imu_raw)
     {
         std::lock_guard<std::mutex> lock(mtx);
+
+        // sensor_msgs::Imu thisImu = *imu_raw; 
 
         sensor_msgs::Imu thisImu = imuConverter(*imu_raw); //imuConverter: imu 값을 lidar 기준으로 변경
 

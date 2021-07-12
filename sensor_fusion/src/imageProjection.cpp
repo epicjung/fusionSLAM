@@ -1,5 +1,9 @@
 #include "utility.h"
 
+#include "camodocal/camera_models/CameraFactory.h"
+#include "camodocal/camera_models/CataCamera.h"
+#include "camodocal/camera_models/PinholeCamera.h"
+
 const int queueLength = 2000;
 
 class ImageProjection : public ParamServer
@@ -8,12 +12,17 @@ private:
 
     std::mutex imuLock;
     std::mutex odoLock;
+    std::mutex uvLock;
     std::mutex imgLock;
 
     ros::Subscriber subLaserCloud;
     
     ros::Publisher pubExtractedCloud;
     ros::Publisher pubLaserCloudInfo;
+
+    // Test publisher
+    ros::Publisher pubExtractedCloudCam;
+    ros::Publisher pubProjectedImage;
 
     ros::Subscriber subImu;
     std::deque<sensor_msgs::Imu> imuQueue;
@@ -22,7 +31,11 @@ private:
     std::deque<nav_msgs::Odometry> odomQueue;
 
     ros::Subscriber subUV;
-    std::deque<pair<double, map<uint, Eigen::Vector2d>>> uvQueue;
+    // std::deque<pair<double, map<uint, Eigen::Vector2d>>> uvQueue;
+    std::deque<sensor_msgs::PointCloud> uvQueue;
+
+    ros::Subscriber subImage;
+    std::deque<pair<double, sensor_msgs::Image>> imgQueue;
 
     std::deque<sensor_msgs::PointCloud2> cloudQueue;
     sensor_msgs::PointCloud2 currentCloudMsg;
@@ -56,11 +69,11 @@ private:
     std_msgs::Header cloudHeader;
 
     // Image deskewing
-    pair<double, map<uint, Eigen::Vector2d>> deskewImage;
+    sensor_msgs::PointCloud pointFeature;
     double imgDeskewTime;
     bool imgDeskewFlag;
     int imuPointerImg;
-    Eigen::Affine3f transStart2Cam;
+    Eigen::Affine3f transStart2Point;
 
 public:
     ImageProjection():
@@ -69,8 +82,11 @@ public:
         subImu        = nh.subscribe<sensor_msgs::Imu>(imuTopic, 2000, &ImageProjection::imuHandler, this, ros::TransportHints().tcpNoDelay());
         subOdom       = nh.subscribe<nav_msgs::Odometry>(odomTopic+"_incremental", 2000, &ImageProjection::odometryHandler, this, ros::TransportHints().tcpNoDelay());
         subLaserCloud = nh.subscribe<sensor_msgs::PointCloud2>(cloudTopic, 5, &ImageProjection::cloudHandler, this, ros::TransportHints().tcpNoDelay());
-        subUV         = nh.subscribe<sensor_msgs::PointCloud>("tracked_feature", 100, &ImageProjection::uvHandler, this, ros::TransportHints().tcpNoDelay());
+        subUV         = nh.subscribe<sensor_msgs::PointCloud>("tracked_feature", 1000, &ImageProjection::uvHandler, this, ros::TransportHints().tcpNoDelay());
+        subImage      = nh.subscribe<sensor_msgs::Image>(imgTopic, 1000, &ImageProjection::imgHandler, this, ros::TransportHints().tcpNoDelay());
         pubExtractedCloud = nh.advertise<sensor_msgs::PointCloud2> ("lio_sam/deskew/cloud_deskewed", 1);
+        pubExtractedCloudCam = nh.advertise<sensor_msgs::PointCloud2>("lio_sam/deskew/cam_deskewed", 1);
+        pubProjectedImage = nh.advertise<sensor_msgs::Image>("projected_img", 1);
         pubLaserCloudInfo = nh.advertise<sensor_fusion::cloud_info> ("lio_sam/deskew/cloud_info", 1);
 
         allocateMemory();
@@ -124,7 +140,7 @@ public:
     void imuHandler(const sensor_msgs::Imu::ConstPtr& imuMsg)
     {
         sensor_msgs::Imu thisImu = imuConverter(*imuMsg);
-
+        // sensor_msgs::Imu thisImu = *imuMsg;
         std::lock_guard<std::mutex> lock1(imuLock);
         imuQueue.push_back(thisImu);
 
@@ -146,31 +162,50 @@ public:
         // cout << "roll: " << imuRoll << ", pitch: " << imuPitch << ", yaw: " << imuYaw << endl << endl;
     }
 
+    void transformOdometry(const nav_msgs::Odometry src, nav_msgs::Odometry &dest)
+    {
+        
+    }
+
     void odometryHandler(const nav_msgs::Odometry::ConstPtr& odometryMsg)
     {
         std::lock_guard<std::mutex> lock2(odoLock);
         odomQueue.push_back(*odometryMsg);
     }
-            
-    void uvHandler(const sensor_msgs::PointCloudConstPtr& msg)
+
+    void imgHandler(const sensor_msgs::ImageConstPtr &imgMsg)
     {
-        lock_guard<mutex> lock3(imgLock);
-        // skip first keyframes (to-do)
+        lock_guard<mutex> lock4(imgLock);
+        imgQueue.push_back(make_pair(ROS_TIME(imgMsg), *imgMsg)); 
+    }
 
-        // feature measurements
-        std::vector<uint> ids;
-        std::vector<Eigen::Vector2d> uvs;
+    // void uvHandler(const sensor_msgs::PointCloudConstPtr& msg)
+    // {
+    //     lock_guard<mutex> lock3(uvLock);
+    //     printf("incoming uv time past: %f\n", msg->header.stamp.toSec());
+    //     // skip first keyframes (to-do)
 
-        // loop through features and append (to-do: vector to queue)
-        map<uint, Eigen::Vector2d> feature;
-        for(size_t i = 0; i < msg->points.size(); ++i)
-        {
-            Eigen::Vector2d uv;
-            int id = msg->channels[0].values[i];
-            uv << msg->points[i].x, msg->points[i].y;
-            feature[uint(id)] = uv;
-        }
-        uvQueue.push_back(make_pair(ROS_TIME(msg), feature));
+    //     // feature measurements
+    //     std::vector<uint> ids;
+    //     std::vector<Eigen::Vector2d> uvs;
+
+    //     // loop through features and append (to-do: vector to queue)
+    //     map<uint, Eigen::Vector2d> feature;
+    //     for(size_t i = 0; i < msg->points.size(); ++i)
+    //     {
+    //         Eigen::Vector2d uv;
+    //         int id = msg->channels[0].values[i];
+    //         uv << msg->points[i].x, msg->points[i].y;
+    //         feature[uint(id)] = uv;
+    //     }
+    //     uvQueue.push_back(make_pair(ROS_TIME(msg), feature));
+    // }
+
+    void uvHandler(const sensor_msgs::PointCloudConstPtr &msg)
+    {
+        lock_guard<mutex> lock3(uvLock);
+        printf("incoming uv time past: %f\n", msg->header.stamp.toSec());
+        uvQueue.push_back(*msg);
     }
        
 
@@ -184,7 +219,12 @@ public:
 
         if (!getFirstImage(timeScanCur, timeScanEnd))
         { 
-            printf("Image Not available\n");
+            printf ("\033[31;1m Image Not Available \033[0m\n");
+        }
+        else
+        {
+            printf ("\033[32;1m Image Available \033[0m\n");
+            printf("imgDeskewTime: %f\n", imgDeskewTime);
         }
 
         if (!deskewInfo())
@@ -201,6 +241,11 @@ public:
         cloudExtraction();
 
         publishClouds();
+
+        if (imgDeskewFlag)
+            associatePointFeature();
+
+        // visualizeProjection();
 
         resetParameters();
     }
@@ -312,26 +357,33 @@ public:
 
     bool getFirstImage(double start, double end)
     {
-        lock_guard<mutex> lock3(imgLock);
+        lock_guard<mutex> lock3(uvLock);
         
         // pop old features
-        while (uvQueue.front().first < start)
+        while (!uvQueue.empty())
         {
-            uvQueue.pop_front();
-        }
-
-        // get first feature
-        if (!uvQueue.empty())
-        {
-            if (uvQueue.front().first < end)
+            printf("Front feature size: %d\n", uvQueue.front().points.size());
+            if (ROS_TIME(&uvQueue.front()) > start)
             {
-                imgDeskewTime = uvQueue.front().first;
-                deskewImage = uvQueue.front();
-                printf("First image at time: %f\n", uvQueue.front().first);
-                return true;
+                if (ROS_TIME(&uvQueue.front()) < end)
+                {
+                    pointFeature = uvQueue.front();
+                    imgDeskewTime = ROS_TIME(&pointFeature);
+                    printf("First image at time: %f\n", imgDeskewTime);
+                    return true;
+                }
+                else
+                {
+                    imgDeskewTime = -1;
+                    return false;
+                }
+            }
+            else
+            {
+                uvQueue.pop_front();
             }
         }
-        imgDeskewTime = -1;
+        printf("Empty uv queue\n");
         return false;
     }
 
@@ -340,7 +392,7 @@ public:
     {
         std::lock_guard<std::mutex> lock1(imuLock);
         std::lock_guard<std::mutex> lock2(odoLock);
-        std::lock_guard<std::mutex> lock3(imgLock);
+        std::lock_guard<std::mutex> lock3(uvLock);
         // make sure IMU data available for the scan
         // imuQueue.front()가 scan 시작보다 이 전에 들어온 데이터여야 하며, back()이 scan 끝났을 때보다 이 후에 들어오는 데이터여야 deskew를 진행한다.
         // 예) imu1 imu2 timeScanCur imu3 imu4 imu5 timeScanEnd imu6 imu7
@@ -382,6 +434,11 @@ public:
             sensor_msgs::Imu thisImuMsg = imuQueue[i];
             double currentImuTime = thisImuMsg.header.stamp.toSec();
 
+            // Convert imu measurements to camera frame or lider frame
+            if (imgDeskewTime > 0)
+            {
+            }
+
             // get roll, pitch, and yaw estimation for this scan
             // timeScanCur보다 이전이지만 제일 가까운 Imu 값의 orientation을 현재 lidar의 init orientation으로 놓는다. 
             if (currentImuTime <= timeScanCur)
@@ -408,7 +465,7 @@ public:
             double angular_x, angular_y, angular_z;
             imuAngular2rosAngular(&thisImuMsg, &angular_x, &angular_y, &angular_z);
 
-            // integrate rotation
+            // integrate rotation (imu에서 lidar로 transform 필요)
             double timeDiff = currentImuTime - imuTime[imuPointerCur-1];
             imuRotX[imuPointerCur] = imuRotX[imuPointerCur-1] + angular_x * timeDiff;
             imuRotY[imuPointerCur] = imuRotY[imuPointerCur-1] + angular_y * timeDiff;
@@ -431,8 +488,8 @@ public:
 
         while (!odomQueue.empty())
         {
-            ROS_WARN("imageProjection: queue size: %d", odomQueue.size());
-            printf("odomQueue: %f, scan: %f\n", odomQueue.front().header.stamp.toSec(), timeScanCur);
+            // ROS_WARN("imageProjection: queue size: %d", odomQueue.size());
+            // printf("odomQueue: %f, scan: %f\n", odomQueue.front().header.stamp.toSec(), timeScanCur);
             if (odomQueue.front().header.stamp.toSec() < timeScanCur - 0.01)
                 odomQueue.pop_front();
             else
@@ -587,13 +644,15 @@ public:
         Eigen::Affine3f transCur = pcl::getTransformation(posXCur, posYCur, posZCur, rotXCur, rotYCur, rotZCur);
         Eigen::Affine3f transBt;
         
+
         if (imgDeskewFlag) // transform points to camera
         {
-            transBt = transStart2Cam.inverse() * transCur;
+            transBt = transStart2Point.inverse() * transCur;
             cloudInfo.isCloud = false;
         } else { // transform poitns to start
             transBt = transStartInverse * transCur;
             cloudInfo.isCloud = true;
+            printf("Transform points to start\n");
         }
 
         PointType newPoint;
@@ -626,12 +685,12 @@ public:
             printf("posX: %f, posY: %f, posZ: %f\n", posXCur, posYCur, posZCur);
             printf("rotX: %f, rotY: %f, rotZ: %f\n", rotXCur, rotYCur, rotZCur);
             
-            transStart2Cam = pcl::getTransformation(posXCur, posYCur, posZCur, rotXCur, rotYCur, rotZCur);
+            transStart2Point = pcl::getTransformation(posXCur, posYCur, posZCur, rotXCur, rotYCur, rotZCur);
 
             // Transform initialGuess to Camera 
             Eigen::Affine3f transWorld2Start = pcl::getTransformation(cloudInfo.initialGuessX, cloudInfo.initialGuessY, cloudInfo.initialGuessZ,
                                                             cloudInfo.initialGuessRoll, cloudInfo.initialGuessPitch, cloudInfo.initialGuessYaw);
-            Eigen::Affine3f transWorld2Cam = transWorld2Start * transStart2Cam;
+            Eigen::Affine3f transWorld2Cam = transWorld2Start * transStart2Point;
             float camPosX, camPosY, camPosZ, camRoll, camPitch, camYaw;
             pcl::getTranslationAndEulerAngles(transWorld2Cam, camPosX, camPosY, camPosZ, camRoll, camPitch, camYaw);
             printf("camPosX: %f, camPosY: %f, camPosZ: %f\n", camPosX, camPosY, camPosZ);
@@ -718,6 +777,207 @@ public:
                 }
             }
             cloudInfo.endRingIndex[i] = count -1 - 5;
+        }
+    }
+
+    void associatePointFeature()
+    {
+        TicToc tictoc;
+        // get camera info
+        vector<camodocal::CameraPtr> m_camera;
+        for (size_t i = 0; i < CAM_NAMES.size(); i++)
+        {
+            ROS_DEBUG("reading paramerter of camera %s", CAM_NAMES[i].c_str());
+            FILE *fh = fopen(CAM_NAMES[i].c_str(), "r");
+            if (fh == NULL)
+            {
+                ROS_WARN("config_file doesn't exist");
+                ROS_BREAK();
+                return;
+            }
+            fclose(fh);
+
+            camodocal::CameraPtr camera = camodocal::CameraFactory::instance()->generateCameraFromYamlFile(CAM_NAMES[i]);
+            m_camera.push_back(camera);
+        }
+
+        // project 3D points to image plane
+        pcl::PointCloud<PointType>::Ptr transCloud(new pcl::PointCloud<PointType>());
+        pcl::transformPointCloud(*extractedCloud, *transCloud, transLidar2Cam.inverse());
+        
+        sensor_msgs::PointCloud associatedFeature;
+        associatedFeature.header.stamp = cloudInfo.header.stamp;
+        associatedFeature.header.frame_id = "uv_measurements";
+        associatedFeature.channels.resize(4);
+        associatedFeature.channels[0].name = "feature_id";
+        associatedFeature.channels[1].name = "X";
+        associatedFeature.channels[2].name = "Y";
+        associatedFeature.channels[3].name = "Z";
+
+        for (auto& xyz : transCloud->points)
+        {
+            if (xyz.z > 0) // in front of camera
+            {
+                Vector2d projPoint;
+                Vector3d spacePoint(xyz.x, xyz.y, xyz.z);
+                m_camera[0]->spaceToPlane(spacePoint, projPoint);
+                if (projPoint.x() >= 0 && projPoint.x() < m_camera[0]->imageWidth() && projPoint.y() >=0 && projPoint.y() < m_camera[0]->imageHeight())
+                {
+                    for (size_t i=0; i < pointFeature.points.size(); ++i)
+                    {
+                        uint associated = uint(pointFeature.channels[1].values[i]);
+                        if (!associated)
+                        {
+                            Vector2d uv(pointFeature.points[i].x, pointFeature.points[i].y);
+                            double dist = vectorDistance(uv, projPoint);
+                            if (dist < DEPTH_ASSOCIATE_THRES)
+                            {
+                                pointFeature.channels[1].values[i] = 1.0; // associated flag on 
+                                associatedFeature.points.push_back(pointFeature.points[i]); // uv
+                                associatedFeature.channels[0].values.push_back(pointFeature.channels[0].values[i]); // id
+                                associatedFeature.channels[1].values.push_back(spacePoint.x()); // X from camera coordinate
+                                associatedFeature.channels[2].values.push_back(spacePoint.y()); // Y from camera coordinate
+                                associatedFeature.channels[3].values.push_back(spacePoint.z()); // Z from camera coordinate
+                            }
+                        }
+                    }
+                }            
+            }
+        }
+        printf("Associate point feature time: %fms\n", tictoc.toc());
+
+        cloudInfo.point_feature = associatedFeature;
+        printf("PointFeature size: %d\n", pointFeature.points.size());
+        printf("AssociatedFeature size: %d\n", associatedFeature.points.size());
+
+        visualizeAssociatedPoints();
+    }
+
+    void visualizeAssociatedPoints()
+    {
+          // pop old images
+        cv_bridge::CvImagePtr cv_ptr;
+        bool isFound = false;
+        {
+            lock_guard<mutex> lock4(imgLock);
+            
+            while (!imgQueue.empty())
+            {
+                if (imgQueue.front().first < imgDeskewTime)
+                {
+                    imgQueue.pop_front();
+                }
+                else if (imgQueue.front().first == imgDeskewTime)
+                {
+                    // cv::Mat grayImage = imgQueue.front().second;
+                    // cvtColor(grayImage, thisImage, CV_GRAY2RGB);
+                    sensor_msgs::Image thisImage = imgQueue.front().second;
+                    cv_ptr = cv_bridge::toCvCopy(thisImage, sensor_msgs::image_encodings::BGRA8);
+                    imgQueue.pop_front();
+                    isFound = true;
+                    printf("Found the image\n");
+                    break;
+                }
+            }
+        }
+
+        if (isFound)
+        {
+            for (size_t i = 0; i < pointFeature.points.size(); ++i)
+            {
+                uint associated = uint(pointFeature.channels[1].values[i]);
+                cv::Point2f uv(pointFeature.points[i].x, pointFeature.points[i].y);
+                if (associated)
+                {
+                    cv::circle(cv_ptr->image, uv, 3, cv::Scalar(0, 255, 0), 1);
+                }
+                else
+                {
+                    cv::circle(cv_ptr->image, uv, 3, cv::Scalar(0, 0, 255), 1);
+                }
+            }
+            pubProjectedImage.publish(cv_ptr->toImageMsg());
+        }
+    }
+
+    void visualizeProjection()
+    {
+        if (imgDeskewFlag)
+        {
+            // pop old images
+            cv_bridge::CvImagePtr cv_ptr;
+            bool isFound = false;
+            {
+                lock_guard<mutex> lock4(imgLock);
+                
+                while (!imgQueue.empty())
+                {
+                    if (imgQueue.front().first < imgDeskewTime)
+                    {
+                        imgQueue.pop_front();
+                    }
+                    else if (imgQueue.front().first == imgDeskewTime)
+                    {
+                        // cv::Mat grayImage = imgQueue.front().second;
+                        // cvtColor(grayImage, thisImage, CV_GRAY2RGB);
+                        sensor_msgs::Image thisImage = imgQueue.front().second;
+                        cv_ptr = cv_bridge::toCvCopy(thisImage, sensor_msgs::image_encodings::BGRA8);
+                        imgQueue.pop_front();
+                        isFound = true;
+                        printf("Found the image\n");
+                        break;
+                    }
+                }
+            }
+
+            if (isFound)
+            {
+                // get camera info
+                vector<camodocal::CameraPtr> m_camera;
+                for (size_t i = 0; i < CAM_NAMES.size(); i++)
+                {
+                    ROS_DEBUG("reading paramerter of camera %s", CAM_NAMES[i].c_str());
+                    FILE *fh = fopen(CAM_NAMES[i].c_str(), "r");
+                    if (fh == NULL)
+                    {
+                        ROS_WARN("config_file doesn't exist");
+                        ROS_BREAK();
+                        return;
+                    }
+                    fclose(fh);
+
+                    camodocal::CameraPtr camera = camodocal::CameraFactory::instance()->generateCameraFromYamlFile(CAM_NAMES[i]);
+                    m_camera.push_back(camera);
+                }
+
+                // project 3d to image plane
+                pcl::PointCloud<PointType>::Ptr transCloud(new pcl::PointCloud<PointType>());
+                pcl::transformPointCloud(*extractedCloud, *transCloud, transLidar2Cam.inverse());
+                for (auto& point : transCloud->points)
+                {
+                    if (point.z > 0)
+                    {
+                        Vector3d spacePoint(point.x, point.y, point.z);
+                        float maxVal = 20.0;
+		                int red = min(255, (int)(255 * abs((point.z - maxVal) / maxVal)));
+		                int green = min(255, (int)(255 * (1 - abs((point.z - maxVal) / maxVal ))));
+                        Vector2d imagePoint;
+                        m_camera[0]->spaceToPlane(spacePoint, imagePoint);
+                        if (imagePoint.x() >= 0 && imagePoint.x() < m_camera[0]->imageWidth() && imagePoint.y() >=0 && imagePoint.y() < m_camera[0]->imageHeight())
+                        {
+                            // printf("3d: %f, %f, %f\n", point.x, point.y, point.z);
+                            // printf("uv: %f, %f\n", imagePoint.x(), imagePoint.y());
+                            // printf("red: %d, green %d\n", red, green);
+                            cv::Point2f uv(imagePoint.x(), imagePoint.y());
+                            cv::circle(cv_ptr->image, uv, 1, cv::Scalar(0, green, red), -1);
+                        }
+                    }
+                }
+
+                // publish to new topic
+                pubProjectedImage.publish(cv_ptr->toImageMsg());
+                publishCloud(&pubExtractedCloudCam, transCloud, cloudHeader.stamp, lidarFrame);
+            }
         }
     }
     

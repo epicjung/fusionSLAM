@@ -1624,40 +1624,40 @@ public:
         }
     }
 
-    // transform lidar pose to imu pose
-    void transformPose(const geometry_msgs::PoseStamped src, geometry_msgs::PoseStamped &dest)
-    {
-        double x = src.pose.position.x;
-        double y = src.pose.position.y;
-        double z = src.pose.position.z;
-        double qx = src.pose.orientation.x;
-        double qy = src.pose.orientation.y;
-        double qz = src.pose.orientation.z;
-        double qw = src.pose.orientation.w;
+    // // transform lidar pose to imu pose
+    // void transformPose(const geometry_msgs::PoseStamped src, geometry_msgs::PoseStamped &dest)
+    // {
+    //     double x = src.pose.position.x;
+    //     double y = src.pose.position.y;
+    //     double z = src.pose.position.z;
+    //     double qx = src.pose.orientation.x;
+    //     double qy = src.pose.orientation.y;
+    //     double qz = src.pose.orientation.z;
+    //     double qw = src.pose.orientation.w;
 
-        gtsam::Pose3 lidar2Imu = gtsam::Pose3(gtsam::Rot3(extRot.transpose()), gtsam::Point3(-extTrans.x(), -extTrans.y(), -extTrans.z()));
-        gtsam::Pose3 imu2Gps = gtsam::Pose3(gtsam::Rot3(1, 0, 0, 0), gtsam::Point3(-imu2gpsTrans.x(), -imu2gpsTrans.y(), -imu2gpsTrans.z()));
-        gtsam::Pose3 lidar_pose = gtsam::Pose3(gtsam::Rot3::Quaternion(qw, qx, qy, qz), gtsam::Point3(x, y, z));
-        gtsam::Pose3 imu_pose = lidar_pose.compose(lidar2Imu);
+    //     gtsam::Pose3 lidar2Imu = gtsam::Pose3(gtsam::Rot3(extRot.transpose()), gtsam::Point3(-extTrans.x(), -extTrans.y(), -extTrans.z()));
+    //     gtsam::Pose3 imu2Gps = gtsam::Pose3(gtsam::Rot3(1, 0, 0, 0), gtsam::Point3(-imu2gpsTrans.x(), -imu2gpsTrans.y(), -imu2gpsTrans.z()));
+    //     gtsam::Pose3 lidar_pose = gtsam::Pose3(gtsam::Rot3::Quaternion(qw, qx, qy, qz), gtsam::Point3(x, y, z));
+    //     gtsam::Pose3 imu_pose = lidar_pose.compose(lidar2Imu);
         
 
-        printf("IMU pose\n");
-        std::cout << imu_pose.translation().x() << std::endl;
-        std::cout << imu_pose.translation().y() << std::endl;
-        std::cout << imu_pose.translation().z() << std::endl;
+    //     printf("IMU pose\n");
+    //     std::cout << imu_pose.translation().x() << std::endl;
+    //     std::cout << imu_pose.translation().y() << std::endl;
+    //     std::cout << imu_pose.translation().z() << std::endl;
 
-        gtsam::Pose3 gps_pose = imu_pose.compose(imu2Gps); 
+    //     gtsam::Pose3 gps_pose = imu_pose.compose(imu2Gps); 
         
-        dest.header.stamp = src.header.stamp;
-        dest.header.frame_id = odometryFrame;
-        dest.pose.position.x = gps_pose.translation().x();
-        dest.pose.position.y = gps_pose.translation().y();
-        dest.pose.position.z = gps_pose.translation().z();
-        dest.pose.orientation.x = gps_pose.rotation().toQuaternion().x();
-        dest.pose.orientation.y = gps_pose.rotation().toQuaternion().y();
-        dest.pose.orientation.z = gps_pose.rotation().toQuaternion().z();
-        dest.pose.orientation.w = gps_pose.rotation().toQuaternion().w();
-    }
+    //     dest.header.stamp = src.header.stamp;
+    //     dest.header.frame_id = odometryFrame;
+    //     dest.pose.position.x = gps_pose.translation().x();
+    //     dest.pose.position.y = gps_pose.translation().y();
+    //     dest.pose.position.z = gps_pose.translation().z();
+    //     dest.pose.orientation.x = gps_pose.rotation().toQuaternion().x();
+    //     dest.pose.orientation.y = gps_pose.rotation().toQuaternion().y();
+    //     dest.pose.orientation.z = gps_pose.rotation().toQuaternion().z();
+    //     dest.pose.orientation.w = gps_pose.rotation().toQuaternion().w();
+    // }
 
     void updatePath(const PointTypePose& pose_in)
     {
@@ -1673,10 +1673,10 @@ public:
         pose_stamped.pose.orientation.z = q.z();
         pose_stamped.pose.orientation.w = q.w();
 
-        // euigon
-        geometry_msgs::PoseStamped gps_posestamped;
-        transformPose(pose_stamped, gps_posestamped);
-        gpsGlobalPath.poses.push_back(gps_posestamped);
+        // // euigon
+        // geometry_msgs::PoseStamped gps_posestamped;
+        // transformPose(pose_stamped, gps_posestamped);
+        // gpsGlobalPath.poses.push_back(gps_posestamped);
 
         globalPath.poses.push_back(pose_stamped);
     }

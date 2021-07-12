@@ -92,11 +92,18 @@ int connection_loop(ros::NodeHandle& nh, sensor::client& cli,
         }
         if (state & sensor::LIDAR_DATA) {
             if (sensor::read_lidar_packet(cli, lidar_packet.buf.data(), pf))
-                lidar_packet_pub.publish(lidar_packet);
+		{
+			//lidar_packet.header.stamp.fromSec(ros::Time::now().toSec());
+                	lidar_packet_pub.publish(lidar_packet);
+			//printf("Time: %f\n", ros::Time::now().toSec());
+		}
         }
         if (state & sensor::IMU_DATA) {
             if (sensor::read_imu_packet(cli, imu_packet.buf.data(), pf))
-                imu_packet_pub.publish(imu_packet);
+		{
+			//imu_packet.header.stamp.fromSec(ros::Time::now().toSec());
+			imu_packet_pub.publish(imu_packet);
+		}
         }
         ros::spinOnce();
     }

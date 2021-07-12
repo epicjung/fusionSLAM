@@ -2,8 +2,9 @@
 
     <arg name="project" default="sensor_fusion"/>
     
-    <node name="republish" type="republish" pkg="image_transport" output="screen" args="compressed in:=/out out:=/camera/image"/>
-    
+    <!-- <node name="republish" type="republish" pkg="image_transport" output="screen" args="compressed in:=/out out:=/camera/image"/> -->
+    <node name="republish" type="republish" pkg="image_transport" output="screen" args="compressed in:=/rgb/image_raw out:=/camera/image"/>
+
     <!-- Parameters -->
     <rosparam file="$(find sensor_fusion)/config/params.yaml" command="load" />
 
