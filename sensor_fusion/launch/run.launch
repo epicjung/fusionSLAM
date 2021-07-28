@@ -6,6 +6,7 @@
     <node name="republish" type="republish" pkg="image_transport" output="screen" args="compressed in:=/rgb/image_raw out:=/camera/image"/>
 
     <!-- Parameters -->
+    <!-- <rosparam file="$(find sensor_fusion)/config/params.yaml" command="load" /> -->
     <rosparam file="$(find sensor_fusion)/config/params.yaml" command="load" />
 
     <!--- LOAM -->

@@ -7,7 +7,7 @@
   <arg name="replay" default="false" doc="do not connect to a sensor; expect /os_node/{lidar,imu}_packets from replay"/>
   <arg name="lidar_mode" default="1024x10" doc="resolution and rate: either 512x10, 512x20, 1024x10, 1024x20, or 2048x10"/>
   <arg name="timestamp_mode" default="TIME_FROM_PTP_1588" doc="method used to timestamp measurements: TIME_FROM_INTERNAL_OSC, TIME_FROM_SYNC_PULSE_IN, TIME_FROM_PTP_1588"/>
-  <arg name="metadata" default="" doc="override default metadata file for replays"/>
+  <arg name="metadata" default="os-122039000077.local.json" doc="override default metadata file for replays"/>
   <arg name="viz" default="false" doc="whether to run a simple visualizer"/>
   <arg name="image" default="true" doc="publish range/intensity/noise image topic"/>
   <arg name="tf_prefix" default="" doc="namespace for tf transforms"/>

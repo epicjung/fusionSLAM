@@ -211,6 +211,7 @@ public:
 
     void cloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
     {
+        cloudInfo.isCloud = true; // default
 
         if (!cachePointCloud(laserCloudMsg))
         {
@@ -233,17 +234,14 @@ public:
             return;
         }
 
-        // temp
-        imgDeskewFlag = imuPointerImg > 0 ? true : false; 
-        
         projectPointCloud();
 
         cloudExtraction();
 
-        publishClouds();
-
         if (imgDeskewFlag)
             associatePointFeature();
+
+        publishClouds();
 
         // visualizeProjection();
 
@@ -479,7 +477,9 @@ public:
         if (imuPointerCur <= 0)
             return;
 
+        imgDeskewFlag = imuPointerImg > 0 ? true : false; 
         cloudInfo.imuAvailable = true;
+        printf("imuPointerImag: %d\n", imuPointerImg);
     }
 
     void odomDeskewInfo()
@@ -652,7 +652,6 @@ public:
         } else { // transform poitns to start
             transBt = transStartInverse * transCur;
             cloudInfo.isCloud = true;
-            printf("Transform points to start\n");
         }
 
         PointType newPoint;
@@ -686,26 +685,29 @@ public:
             printf("rotX: %f, rotY: %f, rotZ: %f\n", rotXCur, rotYCur, rotZCur);
             
             transStart2Point = pcl::getTransformation(posXCur, posYCur, posZCur, rotXCur, rotYCur, rotZCur);
-
+            cout << transStart2Point.matrix() << endl;
             // Transform initialGuess to Camera 
             Eigen::Affine3f transWorld2Start = pcl::getTransformation(cloudInfo.initialGuessX, cloudInfo.initialGuessY, cloudInfo.initialGuessZ,
                                                             cloudInfo.initialGuessRoll, cloudInfo.initialGuessPitch, cloudInfo.initialGuessYaw);
-            Eigen::Affine3f transWorld2Cam = transWorld2Start * transStart2Point;
+            Eigen::Affine3f transWorld2Cam = transWorld2Start * transStart2Point * affineL2C;
+            
             float camPosX, camPosY, camPosZ, camRoll, camPitch, camYaw;
             pcl::getTranslationAndEulerAngles(transWorld2Cam, camPosX, camPosY, camPosZ, camRoll, camPitch, camYaw);
+            cout << transWorld2Cam.matrix() << endl;
             printf("camPosX: %f, camPosY: %f, camPosZ: %f\n", camPosX, camPosY, camPosZ);
             printf("camRoll: %f, camPitch: %f, camYaw: %f\n", camRoll, rotYCur, rotZCur);
+            
+            // Send transform
+            // Change timestamp for the pointcloud
+            ros::Time rosTime(imgDeskewTime);
+            cloudInfo.header.stamp = rosTime;
+            cloudInfo.header.frame_id = camFrame;
             cloudInfo.initialGuessX = camPosX;
             cloudInfo.initialGuessY = camPosY;
             cloudInfo.initialGuessZ = camPosZ;
             cloudInfo.initialGuessRoll  = camRoll;
             cloudInfo.initialGuessPitch = camPitch;
             cloudInfo.initialGuessYaw   = camYaw;
-
-            // Change timestamp for the pointcloud
-            ros::Time rosTime(imgDeskewTime);
-            cloudInfo.header.stamp = rosTime;
-            cloudInfo.header.frame_id = imuFrame;
         }
 
         int cloudSize = laserCloudIn->points.size();
@@ -803,7 +805,7 @@ public:
 
         // project 3D points to image plane
         pcl::PointCloud<PointType>::Ptr transCloud(new pcl::PointCloud<PointType>());
-        pcl::transformPointCloud(*extractedCloud, *transCloud, transLidar2Cam.inverse());
+        pcl::transformPointCloud(*extractedCloud, *transCloud, affineL2C.inverse());
         
         sensor_msgs::PointCloud associatedFeature;
         associatedFeature.header.stamp = cloudInfo.header.stamp;
@@ -830,7 +832,7 @@ public:
                         {
                             Vector2d uv(pointFeature.points[i].x, pointFeature.points[i].y);
                             double dist = vectorDistance(uv, projPoint);
-                            if (dist < DEPTH_ASSOCIATE_THRES)
+                            if (dist < depthAssociateThres)
                             {
                                 pointFeature.channels[1].values[i] = 1.0; // associated flag on 
                                 associatedFeature.points.push_back(pointFeature.points[i]); // uv
@@ -839,13 +841,22 @@ public:
                                 associatedFeature.channels[2].values.push_back(spacePoint.y()); // Y from camera coordinate
                                 associatedFeature.channels[3].values.push_back(spacePoint.z()); // Z from camera coordinate
                             }
+                            else
+                            {
+                                pointFeature.channels[1].values[i] = 0.0;
+                                associatedFeature.points.push_back(pointFeature.points[i]);
+                                associatedFeature.channels[0].values.push_back(pointFeature.channels[0].values[i]);
+                                // put inf if not associated
+                                associatedFeature.channels[1].values.push_back(std::nanf("1"));
+                                associatedFeature.channels[2].values.push_back(std::nanf("1"));
+                                associatedFeature.channels[3].values.push_back(std::nanf("1")); 
+                            }
                         }
                     }
                 }            
             }
         }
-        printf("Associate point feature time: %fms\n", tictoc.toc());
-
+        ROS_WARN("Associate point feature time: %fms\n", tictoc.toc());
         cloudInfo.point_feature = associatedFeature;
         printf("PointFeature size: %d\n", pointFeature.points.size());
         printf("AssociatedFeature size: %d\n", associatedFeature.points.size());
@@ -890,7 +901,7 @@ public:
                 if (associated)
                 {
                     cv::circle(cv_ptr->image, uv, 3, cv::Scalar(0, 255, 0), 1);
-                }
+                } 
                 else
                 {
                     cv::circle(cv_ptr->image, uv, 3, cv::Scalar(0, 0, 255), 1);
@@ -952,7 +963,7 @@ public:
 
                 // project 3d to image plane
                 pcl::PointCloud<PointType>::Ptr transCloud(new pcl::PointCloud<PointType>());
-                pcl::transformPointCloud(*extractedCloud, *transCloud, transLidar2Cam.inverse());
+                pcl::transformPointCloud(*extractedCloud, *transCloud, affineL2C.inverse());
                 for (auto& point : transCloud->points)
                 {
                     if (point.z > 0)

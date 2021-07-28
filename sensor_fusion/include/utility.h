@@ -126,7 +126,27 @@ enum NoiseOrder
     O_GW = 9
 };
 
+struct PointXYZIRPYT
+{
+    PCL_ADD_POINT4D
+    PCL_ADD_INTENSITY;                  // preferred way of adding a XYZ+padding
+    float roll;
+    float pitch;
+    float yaw;
+    double time;
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW   // make sure our new allocators are aligned
+} EIGEN_ALIGN16;                    // enforce SSE padding for correct memory alignment
+
+POINT_CLOUD_REGISTER_POINT_STRUCT (PointXYZIRPYT,
+                                   (float, x, x) (float, y, y)
+                                   (float, z, z) (float, intensity, intensity)
+                                   (float, roll, roll) (float, pitch, pitch) (float, yaw, yaw)
+                                   (double, time, time))
+
+
 using PointXYZIRT = VelodynePointXYZIRT;
+
+typedef PointXYZIRPYT  PointTypePose;
 
 typedef pcl::PointXYZI PointType;
 
@@ -149,11 +169,12 @@ class ParamServer
 		string imuFrame;
 		string mapFrame;
 		string lidarFrame;
-		string cameraFrame;
+		string camFrame;
         string odometryFrame;
 
 		// Feature
-		float DEPTH_ASSOCIATE_THRES;
+		float depthAssociateThres;
+		float pointFeatureDistThres;
 
 	    // GPS Settings
 	    bool useImuHeadingInitialization;
@@ -184,14 +205,16 @@ class ParamServer
 	    vector<double> extRPYV;
 	    vector<double> extTransV;
 	    vector<double> imu2gpsTransV;
-	    Eigen::Matrix3d rotLidar2Imu;
+	    Eigen::Matrix3d rotL2I;
 	    Eigen::Matrix3d rpyLidar2Imu;
-	    Eigen::Vector3d transLidar2Imu;
+	    Eigen::Vector3d transL2I;
 	    Eigen::Vector3d imu2gpsTrans;
 	    Eigen::Quaterniond extQRPY;
 
 		// Transformation
-		Eigen::Affine3f transLidar2Cam;
+		Eigen::Affine3f affineL2C;
+		Eigen::Affine3f	affineL2I;
+		Eigen::Affine3f	affineI2C;
 		
 	    // LOAM
 	    float edgeThreshold;
@@ -266,8 +289,8 @@ class ParamServer
 		vector<double> extImuCamTrans;
 		vector<Eigen::Matrix3d> RIC;
 		vector<Eigen::Vector3d> TIC;
-		Eigen::Matrix3d rotImu2Cam;
-	    Eigen::Vector3d transImu2Cam;
+		Eigen::Matrix3d rotI2C;
+	    Eigen::Vector3d transI2C;
 
 		int ROW, COL;
 		int NUM_OF_CAM;
@@ -293,15 +316,17 @@ class ParamServer
 			nh.param<std::string>("fusion/lidarFrame", lidarFrame, "lidar_frame");
 			nh.param<std::string>("fusion/imuFrame", imuFrame, "imu_frame");
 			nh.param<std::string>("fusion/mapFrame", mapFrame, "map_frame");
-            nh.param<std::string>("fusion/odometryFrame", odometryFrame, "odom");
+            nh.param<std::string>("fusion/camFrame", camFrame, "cam_frame");
+			nh.param<std::string>("fusion/odometryFrame", odometryFrame, "odom");
 
 	        nh.param<int>("fusion/estimateExtrinsic", ESTIMATE_EXTRINSIC, 1);
-			nh.param<float>("fusion/depthAssociateThres", DEPTH_ASSOCIATE_THRES, 1.0);
+			nh.param<float>("fusion/combined/depthAssociateThres", depthAssociateThres, 1.0);
+			nh.param<float>("fusion/combined/pointFeatureDistThres", pointFeatureDistThres, 1.0);
 	        nh.param<vector<double>>("fusion/camera/rotImu2Cam", extImuCamRot, vector<double>());
 	        nh.param<vector<double>>("fusion/camera/transImu2Cam", extImuCamTrans, vector<double>());
 	        
-			rotImu2Cam = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extImuCamRot.data(), 3, 3);
-	        transImu2Cam = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extImuCamTrans.data(), 3, 1);
+			rotI2C = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extImuCamRot.data(), 3, 3);
+	        transI2C = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extImuCamTrans.data(), 3, 1);
 
 		    if (ESTIMATE_EXTRINSIC == 2)
 		    {
@@ -326,7 +351,11 @@ class ParamServer
 
 			string sensor_type;
 			nh.param<std::string>("fusion/laser/sensor", sensor_type, "ouster");
-			if (sensor_type == "velodyne") sensor = SensorType::VELODYNE;
+			if (sensor_type == "velodyne")
+			{
+				sensor = SensorType::VELODYNE;
+				printf("Velodyne imported\n");
+			} 
 			else if (sensor_type == "ouster") sensor = SensorType::OUSTER;
 			else 
 			{
@@ -354,9 +383,9 @@ class ParamServer
 	        nh.param<vector<double>>("fusion/laser/rotLidar2Imu", extRotV, vector<double>());
 	        nh.param<vector<double>>("fusion/laser/extrinsicRPY", extRPYV, vector<double>());
 	        nh.param<vector<double>>("fusion/laser/transLidar2Imu", extTransV, vector<double>());
-	        rotLidar2Imu = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extRotV.data(), 3, 3);
+	        rotL2I = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extRotV.data(), 3, 3);
 	        // extRPY = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extRPYV.data(), 3, 3);
-	        transLidar2Imu = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extTransV.data(), 3, 1);
+	        transL2I = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extTransV.data(), 3, 1);
 	        imu2gpsTrans = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(imu2gpsTransV.data(), 3, 1);
 
 	        nh.param<float>("fusion/laser/edgeThreshold", edgeThreshold, 0.1);
@@ -390,7 +419,7 @@ class ParamServer
 	        nh.param<float>("fusion/laser/globalMapVisualizationSearchRadius", globalMapVisualizationSearchRadius, 1e3);
 	        nh.param<float>("fusion/laser/globalMapVisualizationPoseDensity", globalMapVisualizationPoseDensity, 10.0);
 	        nh.param<float>("fusion/laser/globalMapVisualizationLeafSize", globalMapVisualizationLeafSize, 1.0);
-
+			nh.param<bool>("fusion/laser/savePCD", savePCD, false);
 	        nh.param<string>("fusion/camera/calib", calibFile, ".yaml");
 	        string configPath = ros::package::getPath("sensor_fusion") + "/config/";
 	        string camPath = configPath + calibFile;
@@ -420,20 +449,29 @@ class ParamServer
 
 	        printf("Parameters have been loaded\n");
 
-			// Lidar-to-cam transformation
-			Eigen::Vector3d ypr = rotLidar2Imu.eulerAngles(2, 1, 0);
-			Eigen::Affine3f transL2I = pcl::getTransformation(transLidar2Imu.x(), transLidar2Imu.y(), transLidar2Imu.z(), ypr.z(), ypr.y(), ypr.x());
-			ypr = rotImu2Cam.eulerAngles(2, 1, 0);
-			Eigen::Affine3f transI2C = pcl::getTransformation(transImu2Cam.x(), transImu2Cam.y(), transImu2Cam.z(), ypr.z(), ypr.y(), ypr.x());
-			transLidar2Cam = transL2I * transI2C;
+			// Get affine transformation matrix
+			Eigen::Vector3d ypr = rotL2I.eulerAngles(2, 1, 0);
+			affineL2I = pcl::getTransformation(transL2I.x(), transL2I.y(), transL2I.z(), ypr.z(), ypr.y(), ypr.x());
+			ypr = rotI2C.eulerAngles(2, 1, 0);
+			affineI2C = pcl::getTransformation(transI2C.x(), transI2C.y(), transI2C.z(), ypr.z(), ypr.y(), ypr.x());
+			affineL2C = affineL2I * affineI2C;
+
+			// Test (Wonho)
+// 			Eigen::MatrixrotLidar2Cam 
+
+// 			[ 3.2830966986177872e-02, -9.9771742228419513e-01, 5.9009091480326889e-02, 100.0902978301338073e-04,
+// -1.0695450518067135e-02, -5.9388257186973673e-02, -9.9817766066292501e-01, -6.1939914048780222e-02,
+// 9.9940368967948490e-01, 3.2140009005520810e-02, -1.2620811232126291e-02, 4.4749064695750192e-02,
+// 0., 0., 0., 1. ]
 
 			// test
-			cout << transLidar2Cam.matrix() << endl;
+			printf("Utility.h\n");
+			cout << affineL2C.matrix() << endl;
 		}
 
         sensor_msgs::Imu imuConverter(const sensor_msgs::Imu& imu_in)
         {
-			Eigen::Matrix3d extRot = rotLidar2Imu;
+			Eigen::Matrix3d extRot = rotL2I;
             sensor_msgs::Imu imu_out = imu_in;
             // rotate acceleration
             Eigen::Vector3d acc(imu_in.linear_acceleration.x, imu_in.linear_acceleration.y, imu_in.linear_acceleration.z);
@@ -482,7 +520,6 @@ double ROS_TIME(T msg)
 {
     return msg->header.stamp.toSec();
 }
-
 
 template<typename T>
 void imuAngular2rosAngular(sensor_msgs::Imu *thisImuMsg, T *angular_x, T *angular_y, T *angular_z)

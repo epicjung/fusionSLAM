@@ -108,3 +108,9 @@ target_link_libraries(${PROJECT_NAME}_imuPreintegration ${catkin_LIBRARIES} ${PC
 add_executable(${PROJECT_NAME}_visualFeature src/visualFeature.cpp)
 target_link_libraries(${PROJECT_NAME}_visualFeature ${catkin_LIBRARIES} ${OpenCV_LIBRARIES})
 
+# optimization
+add_executable(${PROJECT_NAME}_optimization src/optimization.cpp)
+add_dependencies(${PROJECT_NAME}_optimization ${catkin_EXPORTED_TARGETS} ${PROJECT_NAME}_generate_messages_cpp)
+target_compile_options(${PROJECT_NAME}_optimization PRIVATE ${OpenMP_CXX_FLAGS})
+target_link_libraries(${PROJECT_NAME}_optimization ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} ${OpenMP_CXX_FLAGS} gtsam)
+

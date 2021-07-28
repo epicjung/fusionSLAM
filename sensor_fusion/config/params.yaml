@@ -2,7 +2,6 @@ fusion:
   # Topics
   cloudTopic: "/os_cloud_node/points"
   imuTopic: "/imu/data"
-  # imgTopic: "/camera/image"
   imgTopic: "/image_proc_resize/image"  
   odomTopic: "/odometry"
 
@@ -16,7 +15,9 @@ fusion:
   # Extrinsic parameter between IMU and Camera.
   estimateExtrinsic: 0   # 0  Have an accurate extrinsic parameters. We will trust the following imu^R_cam, imu^T_cam, don't change it.
                           # 1  Have an initial guess about extrinsic parameters. We will optimize around your initial guess.
-  depthAssociateThres: 2.0
+  combined:
+    pointFeatureDistThres: 6.0 # [m]
+    depthAssociateThres: 2.0 # [pixel]
 
   imu:
     # IMU Settings
@@ -34,7 +35,6 @@ fusion:
               -1, 0, 0,
               0, -1, 0]   
     transImu2Cam: [0.4681, 0.0, 0.2539]
-    # transImu2Cam: [0.4681, 0.0, 0.3039] 
     # calib: "cam0_pinhole.yaml"
     # imageWidth: 1920
     # imageHeight: 1080

@@ -226,8 +226,8 @@ public:
 
     int key = 1;
 
-    gtsam::Pose3 imu2Lidar = gtsam::Pose3(gtsam::Rot3(1, 0, 0, 0), gtsam::Point3(-transLidar2Imu.x(), -transLidar2Imu.y(), -transLidar2Imu.z()));
-    gtsam::Pose3 lidar2Imu = gtsam::Pose3(gtsam::Rot3(1, 0, 0, 0), gtsam::Point3(transLidar2Imu.x(), transLidar2Imu.y(), transLidar2Imu.z()));
+    gtsam::Pose3 imu2Lidar = gtsam::Pose3(gtsam::Rot3(1, 0, 0, 0), gtsam::Point3(-transL2I.x(), -transL2I.y(), -transL2I.z()));
+    gtsam::Pose3 lidar2Imu = gtsam::Pose3(gtsam::Rot3(1, 0, 0, 0), gtsam::Point3(transL2I.x(), transL2I.y(), transL2I.z()));
 
     IMUPreintegration()
     {
