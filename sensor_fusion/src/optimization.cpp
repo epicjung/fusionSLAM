@@ -14,6 +14,7 @@
 #include <gtsam/inference/Symbol.h>
 // #include <gtsam/slam/GeneralSFMFactor.h>
 // #include <gtsam/slam/dataset.h>
+#include <gtsam/slam/SmartProjectionPoseFactor.h>
 #include <gtsam/slam/ProjectionFactor.h>
 #include <gtsam/nonlinear/ISAM2.h>
 #include <gtsam_unstable/nonlinear/IncrementalFixedLagSmoother.h>
@@ -23,6 +24,8 @@ using namespace gtsam;
 using namespace cv;
 using symbol_shorthand::C;
 using symbol_shorthand::P;
+
+typedef SmartProjectionPoseFactor<Cal3_S2> SmartFactor;
 
 class optimization : public ParamServer
 {
@@ -169,7 +172,9 @@ public:
 
         for (size_t i = 0; i < cloudInfo.point_feature.points.size(); ++i)
         {
-            bool associated = !isnan(cloudInfo.point_feature.channels[1].values[i]);
+            Point2 measurement = Point2(double(cloudInfo.point_feature.points[i].x), 
+                                        double(cloudInfo.point_feature.points[i].y));
+            bool associated = !isinf(cloudInfo.point_feature.channels[1].values[i]);
             
             if (associated)
             {
@@ -194,15 +199,14 @@ public:
                         {
                             printf("id %d Num seen: %d\n", id, numSeen[id]);
                             lastTime[id] = cloudInfoTimeIn.toSec();
-                            Point2 measurement = Point2(double(cloudInfo.point_feature.points[i].x), 
-                                                        double(cloudInfo.point_feature.points[i].y));
+
                             // convert point to world frame
                             float localX = cloudInfo.point_feature.channels[1].values[i];
                             float localY = cloudInfo.point_feature.channels[2].values[i];
                             float localZ = cloudInfo.point_feature.channels[3].values[i];
 
-                            if (sqrt(localX*localX + localY*localY + localZ*localZ) < pointFeatureDistThres)
-                            {
+                            // if (sqrt(localX*localX + localY*localY + localZ*localZ) < pointFeatureDistThres)
+                            // {
                                 float worldX = initialAffine(0,0)*localX+initialAffine(0,1)*localY+initialAffine(0,2)*localZ+initialAffine(0,3);
                                 float worldY = initialAffine(1,0)*localX+initialAffine(1,1)*localY+initialAffine(1,2)*localZ+initialAffine(1,3);
                                 float worldZ = initialAffine(2,0)*localX+initialAffine(2,1)*localY+initialAffine(2,2)*localZ+initialAffine(2,3);
@@ -248,12 +252,17 @@ public:
                                     factorGraph.add(PriorFactor<Point3>(Symbol('l', id), worldPoint, pointNoise));
                                 }
                                 numPoint++;
-                            }
+                            // }
                         }
                     }
                 }
             }
         }
+
+        // Smart Factor
+        
+
+
         printf("# of points: %d\n", numPoint);
         pubPoint.publish(pointLandmark);
         pubTestImage.publish(cv_ptr->toImageMsg());

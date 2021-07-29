@@ -53,7 +53,7 @@ class VisualFeature : public ParamServer
         VisualFeature()
         {
             subImg        = nh.subscribe<sensor_msgs::Image>(imgTopic, 1000, &VisualFeature::imgHandler, this, ros::TransportHints().tcpNoDelay());
-            pubUV         = nh.advertise<sensor_msgs::PointCloud>("tracked_feature", 1000);
+            pubUV         = nh.advertise<sensor_msgs::PointCloud>("/sensor_fusion/visual/tracked_feature", 1000);
             stereo_cam = 0;
             n_id = 0;
             hasPrediction = false;
@@ -89,11 +89,15 @@ class VisualFeature : public ParamServer
                     featuresMsg.header.stamp = rosImage.header.stamp;
                     featuresMsg.header.frame_id = "image";
                     featuresMsg.points.resize(numPoints);
-                    featuresMsg.channels.resize(2);
+                    featuresMsg.channels.resize(4);
                     featuresMsg.channels[0].name = "feature_id";
                     featuresMsg.channels[0].values.resize(numPoints);
-                    featuresMsg.channels[1].name = "associated";
+                    featuresMsg.channels[1].name = "X";
                     featuresMsg.channels[1].values.resize(numPoints);
+                    featuresMsg.channels[2].name = "Y";
+                    featuresMsg.channels[2].values.resize(numPoints);
+                    featuresMsg.channels[3].name = "Z";
+                    featuresMsg.channels[4].values.resize(numPoints);
                     int cnt = 0;
                     for(auto it = featureFrame.begin(); it != featureFrame.end(); ++it)
                     {
@@ -102,7 +106,9 @@ class VisualFeature : public ParamServer
                         featuresMsg.points[cnt].x = float(xyz_uv_vel(3, 0));
                         featuresMsg.points[cnt].y = float(xyz_uv_vel(4, 0));
                         featuresMsg.channels[0].values[cnt] = float(id);
-                        featuresMsg.channels[1].values[cnt] = 0.0;
+                        featuresMsg.channels[1].values[cnt] = float('inf');
+                        featuresMsg.channels[1].values[cnt] = float('inf');
+                        featuresMsg.channels[1].values[cnt] = float('inf');
                         cnt++;
                     }
                     pubUV.publish(featuresMsg);

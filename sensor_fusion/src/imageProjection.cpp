@@ -62,7 +62,6 @@ private:
     float odomIncreY;
     float odomIncreZ;
 
-
     sensor_fusion::cloud_info cloudInfo;
     double timeScanCur;
     double timeScanEnd;
@@ -75,6 +74,10 @@ private:
     int imuPointerImg;
     Eigen::Affine3f transStart2Point;
 
+    // camera related
+    vector<camodocal::CameraPtr> m_camera;
+
+
 public:
     ImageProjection():
     deskewFlag(0)
@@ -82,7 +85,7 @@ public:
         subImu        = nh.subscribe<sensor_msgs::Imu>(imuTopic, 2000, &ImageProjection::imuHandler, this, ros::TransportHints().tcpNoDelay());
         subOdom       = nh.subscribe<nav_msgs::Odometry>(odomTopic+"_incremental", 2000, &ImageProjection::odometryHandler, this, ros::TransportHints().tcpNoDelay());
         subLaserCloud = nh.subscribe<sensor_msgs::PointCloud2>(cloudTopic, 5, &ImageProjection::cloudHandler, this, ros::TransportHints().tcpNoDelay());
-        subUV         = nh.subscribe<sensor_msgs::PointCloud>("tracked_feature", 1000, &ImageProjection::uvHandler, this, ros::TransportHints().tcpNoDelay());
+        subUV         = nh.subscribe<sensor_msgs::PointCloud>("/sensor_fusion/visual/tracked_feature", 1000, &ImageProjection::uvHandler, this, ros::TransportHints().tcpNoDelay());
         subImage      = nh.subscribe<sensor_msgs::Image>(imgTopic, 1000, &ImageProjection::imgHandler, this, ros::TransportHints().tcpNoDelay());
         pubExtractedCloud = nh.advertise<sensor_msgs::PointCloud2> ("lio_sam/deskew/cloud_deskewed", 1);
         pubExtractedCloudCam = nh.advertise<sensor_msgs::PointCloud2>("lio_sam/deskew/cam_deskewed", 1);
@@ -133,6 +136,23 @@ public:
             imuRotY[i] = 0;
             imuRotZ[i] = 0;
         }
+
+        // get camera info
+        for (size_t i = 0; i < CAM_NAMES.size(); i++)
+        {
+            ROS_DEBUG("reading paramerter of camera %s", CAM_NAMES[i].c_str());
+            FILE *fh = fopen(CAM_NAMES[i].c_str(), "r");
+            if (fh == NULL)
+            {
+                ROS_WARN("config_file doesn't exist");
+                ROS_BREAK();
+                return;
+            }
+            fclose(fh);
+
+            camodocal::CameraPtr camera = camodocal::CameraFactory::instance()->generateCameraFromYamlFile(CAM_NAMES[i]);
+            m_camera.push_back(camera);
+        }
     }
 
     ~ImageProjection(){}
@@ -178,28 +198,6 @@ public:
         lock_guard<mutex> lock4(imgLock);
         imgQueue.push_back(make_pair(ROS_TIME(imgMsg), *imgMsg)); 
     }
-
-    // void uvHandler(const sensor_msgs::PointCloudConstPtr& msg)
-    // {
-    //     lock_guard<mutex> lock3(uvLock);
-    //     printf("incoming uv time past: %f\n", msg->header.stamp.toSec());
-    //     // skip first keyframes (to-do)
-
-    //     // feature measurements
-    //     std::vector<uint> ids;
-    //     std::vector<Eigen::Vector2d> uvs;
-
-    //     // loop through features and append (to-do: vector to queue)
-    //     map<uint, Eigen::Vector2d> feature;
-    //     for(size_t i = 0; i < msg->points.size(); ++i)
-    //     {
-    //         Eigen::Vector2d uv;
-    //         int id = msg->channels[0].values[i];
-    //         uv << msg->points[i].x, msg->points[i].y;
-    //         feature[uint(id)] = uv;
-    //     }
-    //     uvQueue.push_back(make_pair(ROS_TIME(msg), feature));
-    // }
 
     void uvHandler(const sensor_msgs::PointCloudConstPtr &msg)
     {
@@ -782,89 +780,187 @@ public:
         }
     }
 
+    sensor_msgs::ChannelFloat32 getDepth()
+    {
+
+    }
+
     void associatePointFeature()
     {
         TicToc tictoc;
-        // get camera info
-        vector<camodocal::CameraPtr> m_camera;
-        for (size_t i = 0; i < CAM_NAMES.size(); i++)
-        {
-            ROS_DEBUG("reading paramerter of camera %s", CAM_NAMES[i].c_str());
-            FILE *fh = fopen(CAM_NAMES[i].c_str(), "r");
-            if (fh == NULL)
-            {
-                ROS_WARN("config_file doesn't exist");
-                ROS_BREAK();
-                return;
-            }
-            fclose(fh);
 
-            camodocal::CameraPtr camera = camodocal::CameraFactory::instance()->generateCameraFromYamlFile(CAM_NAMES[i]);
-            m_camera.push_back(camera);
-        }
+        sensor_msgs::ChannelFloat32 depths;
+        depths.name = "depth";
+        depths.values.resize(pointFeature.points.size(), -1); // -1 for initial depth
 
-        // project 3D points to image plane
-        pcl::PointCloud<PointType>::Ptr transCloud(new pcl::PointCloud<PointType>());
-        pcl::transformPointCloud(*extractedCloud, *transCloud, affineL2C.inverse());
+        // TO-DO: cloudInfo LiDAR로 변경 필요
+        if (extractedCloud->size() == 0)
+            return;
+
+        // 1. Transform pointcloud to camera frame
+        pcl::PointCloud<PointType>::Ptr camCloud(new pcl::PointCloud<PointType>());
+        pcl::transformPointCloud(*extractedCloud, *camCloud, affineL2C.inverse());
         
-        sensor_msgs::PointCloud associatedFeature;
-        associatedFeature.header.stamp = cloudInfo.header.stamp;
-        associatedFeature.header.frame_id = "uv_measurements";
-        associatedFeature.channels.resize(4);
-        associatedFeature.channels[0].name = "feature_id";
-        associatedFeature.channels[1].name = "X";
-        associatedFeature.channels[2].name = "Y";
-        associatedFeature.channels[3].name = "Z";
+        // 2. Project depth cloud on the range image and filter points in the same region
+        int numBins = 360; 
+        vector<vector<PointType>> pointArray;
+        pointArray.resize(numBins);
+        for (int i = 0; i < numBins; ++i)
+            pointArray[i].resize(numBins);
+        float angRes = 180.0 / float(numBins); // cover only -90~90 FOV of the lidar 
+        cv::Mat rangeImage = cv::Mat(numBins, numBins, CV_32F, cv::Scalar::all(FLT_MAX));
 
-        for (auto& xyz : transCloud->points)
+        for (int i = 0; i < (int)camCloud->size(); ++i)
         {
-            if (xyz.z > 0) // in front of camera
+            PointType p = camCloud->points[i];
+            if (p.z > 0.0 && abs(p.y / p.z) < 10.0 && abs(p.x / p.z) < 10.0)
             {
-                Vector2d projPoint;
-                Vector3d spacePoint(xyz.x, xyz.y, xyz.z);
-                m_camera[0]->spaceToPlane(spacePoint, projPoint);
-                if (projPoint.x() >= 0 && projPoint.x() < m_camera[0]->imageWidth() && projPoint.y() >=0 && projPoint.y() < m_camera[0]->imageHeight())
+                // Horizontal: 0 [deg] (x > 0) ~ 180 [deg] (x < 0) w.r.t x-axis
+                float horizonAngle = atan2(p.z, p.x) * 180.0 / M_PI; 
+                int colIdx = round(horizonAngle / angRes);
+
+                // Vertical: -90 [deg] (y < 0) ~ 90 [deg] (y > 0) w.r.t xz plane
+                float verticalAngle = atan2(p.y, sqrt(p.x*p.x+p.z*p.z)) * 180.0 / M_PI;
+                int rowIdx = round((verticalAngle + 90.0) / angRes);
+
+                if (colIdx >= 0 && colIdx < numBins && rowIdx >= 0 && rowIdx < numBins)
                 {
-                    for (size_t i=0; i < pointFeature.points.size(); ++i)
+                    float range = pointDistance(p);
+                    if (range < rangeImage.at<float>(rowIdx, colIdx))
                     {
-                        uint associated = uint(pointFeature.channels[1].values[i]);
-                        if (!associated)
-                        {
-                            Vector2d uv(pointFeature.points[i].x, pointFeature.points[i].y);
-                            double dist = vectorDistance(uv, projPoint);
-                            if (dist < depthAssociateThres)
-                            {
-                                pointFeature.channels[1].values[i] = 1.0; // associated flag on 
-                                associatedFeature.points.push_back(pointFeature.points[i]); // uv
-                                associatedFeature.channels[0].values.push_back(pointFeature.channels[0].values[i]); // id
-                                associatedFeature.channels[1].values.push_back(spacePoint.x()); // X from camera coordinate
-                                associatedFeature.channels[2].values.push_back(spacePoint.y()); // Y from camera coordinate
-                                associatedFeature.channels[3].values.push_back(spacePoint.z()); // Z from camera coordinate
-                            }
-                            else
-                            {
-                                pointFeature.channels[1].values[i] = 0.0;
-                                associatedFeature.points.push_back(pointFeature.points[i]);
-                                associatedFeature.channels[0].values.push_back(pointFeature.channels[0].values[i]);
-                                // put inf if not associated
-                                associatedFeature.channels[1].values.push_back(std::nanf("1"));
-                                associatedFeature.channels[2].values.push_back(std::nanf("1"));
-                                associatedFeature.channels[3].values.push_back(std::nanf("1")); 
-                            }
-                        }
+                        rangeImage.at<float>(rowIdx, colIdx) = range; 
+                        pointArray[rowIdx][colIdx] = p; 
                     }
-                }            
+                }
             }
         }
-        ROS_WARN("Associate point feature time: %fms\n", tictoc.toc());
-        cloudInfo.point_feature = associatedFeature;
-        printf("PointFeature size: %d\n", pointFeature.points.size());
-        printf("AssociatedFeature size: %d\n", associatedFeature.points.size());
 
-        visualizeAssociatedPoints();
+        // 3. Extract cloud from the range image
+        pcl::PointCloud<PointType>::Ptr camCloudFiltered(new pcl::PointCloud<PointType>());
+        for (int i = 0; i < numBins; ++i)
+        {
+            for (int j = 0; j < numBins; ++j)
+            {
+                if (rangeImage.at<float>(i,j) != FLT_MAX)
+                    camCloudFiltered->push_back(pointArray[i][j]);
+            }
+        }
+
+        // 4. Project pointcloud onto a unit sphere
+        pcl::PointCloud<PointType>::Ptr camCloudSphere(new pcl::PointCloud<PointType>());
+        for (int i = 0; i < (int)camCloudFiltered->size(); ++i)
+        {
+            PointType p = camCloudFiltered->points[i];
+            float range = pointDistance(p);
+            p.x /= range;
+            p.y /= range;
+            p.z /= range;
+            p.intensity = range;
+            camCloudSphere->push_back(p);
+        }
+
+        // TO-DO: cloudInfo LiDAR로 변경 필요
+        if (camCloudSphere->size() < 10) 
+            return;
+
+        // 5. Project 2D point feature to unit sphere
+        pcl::PointCloud<PointType>::Ptr pointSphere(new pcl::PointCloud<PointType>());        
+        for (int i = 0; i < (int)pointFeature.points.size(); ++i)
+        {
+            Eigen::Vector3f thisFeature(pointFeature.points[i].x, pointFeature.points[i].y, 1.0);
+            thisFeature.normalize();
+            PointType p;
+            p.x = thisFeature(0);
+            p.y = thisFeature(1);
+            p.z = thisFeature(2);
+            p.intensity = -1; // depth
+            pointSphere->push_back(p);
+        }
+
+        // 6. create kd-tree
+        pcl::KdTreeFLANN<PointType>::Ptr kdTree(new pcl::KdTreeFLANN<PointType>());
+        kdTree->setInputCloud(camCloudSphere);
+
+        // 7. find feature depth using kd-tree
+        vector<int> pointSearchIdx;
+        vector<float> pointSearchSquaredDist;
+        float distThres = pow(sin(angRes / 180.0 * M_PI) * 5.0, 2);
+        for (int i = 0; i < (int)pointSphere->size(); ++i)
+        {
+            PointType p = pointSphere->points[i];
+            kdTree->nearestKSearch(p, 3, pointSearchIdx, pointSearchSquaredDist);
+            // Three nearest are found and the farthest is within the threshold
+            if (pointSearchIdx.size() == 3 && pointSearchSquaredDist[2] < distThres)
+            {
+                float x0 = camCloudSphere->points[pointSearchIdx[0]].x;
+                float y0 = camCloudSphere->points[pointSearchIdx[0]].y;
+                float z0 = camCloudSphere->points[pointSearchIdx[0]].z;
+                float r0 = camCloudSphere->points[pointSearchIdx[0]].intensity;
+                Vector3f A(x0*r0, y0*r0, z0*r0);
+
+                float x1 = camCloudSphere->points[pointSearchIdx[1]].x;
+                float y1 = camCloudSphere->points[pointSearchIdx[1]].y;
+                float z1 = camCloudSphere->points[pointSearchIdx[1]].z;
+                float r1 = camCloudSphere->points[pointSearchIdx[1]].intensity;
+                Vector3f B(x1*r1, y1*r1, z1*r1);
+
+                float x2 = camCloudSphere->points[pointSearchIdx[2]].x;
+                float y2 = camCloudSphere->points[pointSearchIdx[2]].y;
+                float z2 = camCloudSphere->points[pointSearchIdx[2]].z;
+                float r2 = camCloudSphere->points[pointSearchIdx[2]].intensity;
+                Vector3f C(x2*r2, y2*r2, z2*r2);
+
+                Vector3f V(p.x, p.y, p.z);
+                Vector3f N = (A-B).cross(B-C);
+                
+                float depth = (N(0) * A(0) + N(1) * A(1) + N(2) * A(2)) 
+                               / (N(0) * V(0) + N(1) * V(1) + N(2) * V(2));
+                float minDepth = min(r0, min(r1, r2));
+                float maxDepth = max(r0, max(r1, r2));
+                
+                if (maxDepth - minDepth > 2 || depth <= 0.5)
+                    continue;
+                else if (depth > maxDepth)
+                    depth = maxDepth;
+                else if (depth < minDepth)
+                    depth = minDepth;
+
+                // de-normalized the 3D unit sphere feature
+                pointSphere->points[i].x *= depth;
+                pointSphere->points[i].y *= depth;
+                pointSphere->points[i].z *= depth;
+                pointSphere->points[i].intensity = pointSphere->points[i].z;
+                
+                // update 3D point feature (sensor_msgs::PointCloud)
+                if (pointSphere->points[i].intensity > pointFeatureDistThres)
+                {
+                    depths.values[i] = pointSphere->points[i].intensity;
+                    pointFeature.channels[1].values[i] = pointSphere->points[i].x;
+                    pointFeature.channels[2].values[i] = pointSphere->points[i].y;
+                    pointFeature.channels[3].values[i] = pointSphere->points[i].z;
+                }
+            }
+        }
+
+        visualizeAssociatedPoints(depths);
+
+        cloudInfo.point_feature = pointFeature;
+
+        /* DEBUG */
+        ROS_WARN("Associate point feature time: %fms\n", tictoc.toc());
+        printf("PointFeature size: %d\n", pointFeature.points.size());
+        int count = 0;
+        for (int i = 0; i < (int)depths.values.size(); ++i)
+        {   
+            if (depths.values[i] >= 0)
+            {
+                count++;
+            }
+        }
+        printf("AssociatedFeature size: %d\n", count);
     }
 
-    void visualizeAssociatedPoints()
+    void visualizeAssociatedPoints(sensor_msgs::ChannelFloat32 depths)
     {
           // pop old images
         cv_bridge::CvImagePtr cv_ptr;
@@ -894,14 +990,13 @@ public:
 
         if (isFound)
         {
-            for (size_t i = 0; i < pointFeature.points.size(); ++i)
+            for (int i = 0; i < pointFeature.points.size(); ++i)
             {
-                uint associated = uint(pointFeature.channels[1].values[i]);
                 cv::Point2f uv(pointFeature.points[i].x, pointFeature.points[i].y);
-                if (associated)
+                if (depths.values[i] >= 0)
                 {
                     cv::circle(cv_ptr->image, uv, 3, cv::Scalar(0, 255, 0), 1);
-                } 
+                }
                 else
                 {
                     cv::circle(cv_ptr->image, uv, 3, cv::Scalar(0, 0, 255), 1);
@@ -943,24 +1038,6 @@ public:
 
             if (isFound)
             {
-                // get camera info
-                vector<camodocal::CameraPtr> m_camera;
-                for (size_t i = 0; i < CAM_NAMES.size(); i++)
-                {
-                    ROS_DEBUG("reading paramerter of camera %s", CAM_NAMES[i].c_str());
-                    FILE *fh = fopen(CAM_NAMES[i].c_str(), "r");
-                    if (fh == NULL)
-                    {
-                        ROS_WARN("config_file doesn't exist");
-                        ROS_BREAK();
-                        return;
-                    }
-                    fclose(fh);
-
-                    camodocal::CameraPtr camera = camodocal::CameraFactory::instance()->generateCameraFromYamlFile(CAM_NAMES[i]);
-                    m_camera.push_back(camera);
-                }
-
                 // project 3d to image plane
                 pcl::PointCloud<PointType>::Ptr transCloud(new pcl::PointCloud<PointType>());
                 pcl::transformPointCloud(*extractedCloud, *transCloud, affineL2C.inverse());
