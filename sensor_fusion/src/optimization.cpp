@@ -39,6 +39,7 @@ public:
     ros::Publisher  pubPoint;
     ros::Publisher  pubTestImage;
     ros::Publisher  pubPath;
+    ros::Publisher  pubOdomIncremental;
     int count;
 
     noiseModel::Diagonal::shared_ptr measNoise;
@@ -84,10 +85,11 @@ public:
         odomNoise   = noiseModel::Diagonal::Variances((Vector(6) << 1e-6, 1e-6, 1e-6, 1e-4, 1e-4, 1e-4).finished());
 
         
-        subPoint        = nh.subscribe<sensor_fusion::cloud_info>("lio_sam/feature/cloud_info", 1, &optimization::cloudHandler, this, ros::TransportHints().tcpNoDelay()); 
-        pubPoint        = nh.advertise<visualization_msgs::MarkerArray>("fusion/feature/point_landmark", 1);
-        pubTestImage    = nh.advertise<sensor_msgs::Image>("fusion/feature/test_image", 1);
-        pubPath         = nh.advertise<nav_msgs::Path>("fusion/mapping/path", 1);
+        subPoint            = nh.subscribe<sensor_fusion::cloud_info>("lio_sam/feature/cloud_info", 1, &optimization::cloudHandler, this, ros::TransportHints().tcpNoDelay()); 
+        pubPoint            = nh.advertise<visualization_msgs::MarkerArray>("fusion/feature/point_landmark", 1);
+        pubTestImage        = nh.advertise<sensor_msgs::Image>("fusion/feature/test_image", 1);
+        pubPath             = nh.advertise<nav_msgs::Path>("fusion/mapping/path", 1);
+        pubOdomIncremental  = nh.advertise<nav_msgs::Odometry>("fusion/mapping/odometry_incremental", 1);
         
         // initialization
         count = 0;
@@ -260,8 +262,6 @@ public:
         }
 
         // Smart Factor
-        
-
 
         printf("# of points: %d\n", numPoint);
         pubPoint.publish(pointLandmark);
@@ -290,6 +290,20 @@ public:
         // gpsGlobalPath.poses.push_back(gps_posestamped);
         globalPath.poses.push_back(pose_stamped);
     }
+
+    void publishOdometry()
+    {
+        nav_msgs::Odometry odomIncre;
+        odomIncre.header.stamp = cloudInfoTimeIn;
+        odomIncre.header.frame_id = odometryFrame;
+        odomIncre.child_frame_id = "odom_mapping";
+        odomIncre.pose.pose.position.x = latestX;
+        odomIncre.pose.pose.position.y = latestY;
+        odomIncre.pose.pose.position.z = latestZ;
+        odomIncre.pose.pose.orientation = tf::createQuaternionMsgFromRollPitchYaw(latestRoll, latestPitch, latestYaw);
+        pubOdomIncremental.publish(odomIncre);
+        // TO-DO: consider loop closing and publish relative pose
+    }  
 
     void publishFrames()
     {
@@ -333,6 +347,8 @@ public:
         addPointFactor();
 
         optimize();
+
+        publishOdometry();
 
         publishFrames();
 

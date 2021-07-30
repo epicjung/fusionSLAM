@@ -14,6 +14,7 @@ private:
     std::mutex odoLock;
     std::mutex uvLock;
     std::mutex imgLock;
+    std::mutex lidarLock;
 
     ros::Subscriber subLaserCloud;
     
@@ -38,6 +39,8 @@ private:
     std::deque<pair<double, sensor_msgs::Image>> imgQueue;
 
     std::deque<sensor_msgs::PointCloud2> cloudQueue;
+    std::deque<pcl::PointCloud<PointType>> globalCloudQueue;
+    std::deque<double> timeQueue;
     sensor_msgs::PointCloud2 currentCloudMsg;
 
     double *imuTime = new double[queueLength];
@@ -48,11 +51,13 @@ private:
     int imuPointerCur;
     bool firstPointFlag;
     Eigen::Affine3f transStartInverse;
+    Eigen::Affine3f affineW2C;
 
     pcl::PointCloud<PointXYZIRT>::Ptr laserCloudIn;
     pcl::PointCloud<OusterPointXYZIRT>::Ptr tmpOusterCloudIn;
     pcl::PointCloud<PointType>::Ptr   fullCloud;
     pcl::PointCloud<PointType>::Ptr   extractedCloud;
+    pcl::PointCloud<PointType>::Ptr   accumulatedCloud;
 
     int deskewFlag;
     cv::Mat rangeMat;
@@ -72,7 +77,7 @@ private:
     double imgDeskewTime;
     bool imgDeskewFlag;
     int imuPointerImg;
-    Eigen::Affine3f transStart2Point;
+    Eigen::Affine3f affineStart2Point;
 
     // camera related
     vector<camodocal::CameraPtr> m_camera;
@@ -104,6 +109,7 @@ public:
         tmpOusterCloudIn.reset(new pcl::PointCloud<OusterPointXYZIRT>());
         fullCloud.reset(new pcl::PointCloud<PointType>());
         extractedCloud.reset(new pcl::PointCloud<PointType>());
+        accumulatedCloud.reset(new pcl::PointCloud<PointType>());
 
         fullCloud->points.resize(N_SCAN*HORIZON_SCAN);
 
@@ -236,6 +242,8 @@ public:
 
         cloudExtraction();
 
+        stackPointCloud();
+
         if (imgDeskewFlag)
             associatePointFeature();
 
@@ -244,6 +252,77 @@ public:
         // visualizeProjection();
 
         resetParameters();
+    }
+
+    void stackPointCloud()
+    {
+        TicToc tictoc;
+
+        static int lidarCount = -1;
+        // TO-DO: this should modified to stack the pointcloud even if there is no image to deskew
+        if (cloudInfo.isCloud || ++lidarCount % (lidarSkip+1) != 0) 
+            return;
+
+        // 0. Filter cloud (downsample and keep only points in camera view)
+        pcl::PointCloud<PointType>::Ptr extractedCloudDS(new pcl::PointCloud<PointType>()); 
+        static pcl::VoxelGrid<PointType> downSizeFilter;
+        downSizeFilter.setLeafSize(0.2, 0.2, 0.2);
+        downSizeFilter.setInputCloud(extractedCloud);
+        downSizeFilter.filter(*extractedCloudDS);
+        *extractedCloud = *extractedCloudDS;
+        
+        pcl::PointCloud<PointType>::Ptr extractedCloudFilter(new pcl::PointCloud<PointType>());
+        for (int i = 0; i < (int) extractedCloud->size(); ++i)
+        {
+            PointType p = extractedCloud->points[i];
+            if (p.z > 0.0 && abs(p.y / p.z) < 10.0 && abs(p.x / p.z) < 10.0)
+            {
+                extractedCloudFilter->push_back(p);
+            }
+        }
+        *extractedCloud = *extractedCloudFilter;
+        
+        // 1. Transform pointcloud to global 
+        pcl::PointCloud<PointType>::Ptr globalCloud(new pcl::PointCloud<PointType>());
+        Eigen::Affine3f affineW2C = pcl::getTransformation(cloudInfo.initialGuessX, cloudInfo.initialGuessY, cloudInfo.initialGuessZ,
+                                                    cloudInfo.initialGuessRoll, cloudInfo.initialGuessPitch, cloudInfo.initialGuessYaw);
+        pcl::transformPointCloud(*extractedCloud, *globalCloud, affineW2C);
+
+        ROS_WARN("Transform pointcloud global time: %fms", tictoc.toc());
+
+        // 2. Queue the global cloud and time
+        globalCloudQueue.push_back(*globalCloud);
+        timeQueue.push_back(imgDeskewTime);
+
+        // 3. Only accumulate recent clouds
+        while (!timeQueue.empty())
+        {
+            if (imgDeskewTime - timeQueue.front() > stackPointTime)
+            {
+                globalCloudQueue.pop_front();
+                timeQueue.pop_front();
+            } else {
+                break;
+            }
+        }
+        accumulatedCloud->clear();
+        int count = 0;
+        for (int i = 0; i < (int)globalCloudQueue.size(); ++i)
+        {
+            *accumulatedCloud += globalCloudQueue[i];
+            count ++;
+        }    
+
+        ROS_WARN("Add pointcloud time: %fms", tictoc.toc());
+
+        // // 4. Downsample accumulated global cloud
+        // pcl::PointCloud<PointType>::Ptr accumulatedCloudDS(new pcl::PointCloud<PointType>());
+        // static pcl::VoxelGrid<PointType> downSizeFilter;
+        // downSizeFilter.setLeafSize(0.2, 0.2, 0.2);
+        // downSizeFilter.setInputCloud(accumulatedCloud);
+        // downSizeFilter.filter(*accumulatedCloudDS);
+        // *accumulatedCloud = *accumulatedCloudDS;
+        ROS_WARN("Accumulated %d set of %d pointcloud time: %fms", count, accumulatedCloud->size(), tictoc.toc());
     }
 
     bool cachePointCloud(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
@@ -645,7 +724,7 @@ public:
 
         if (imgDeskewFlag) // transform points to camera
         {
-            transBt = transStart2Point.inverse() * transCur;
+            transBt = affineL2C.inverse() * affineStart2Point.inverse() * transCur;
             cloudInfo.isCloud = false;
         } else { // transform poitns to start
             transBt = transStartInverse * transCur;
@@ -682,16 +761,17 @@ public:
             printf("posX: %f, posY: %f, posZ: %f\n", posXCur, posYCur, posZCur);
             printf("rotX: %f, rotY: %f, rotZ: %f\n", rotXCur, rotYCur, rotZCur);
             
-            transStart2Point = pcl::getTransformation(posXCur, posYCur, posZCur, rotXCur, rotYCur, rotZCur);
-            cout << transStart2Point.matrix() << endl;
+            affineStart2Point = pcl::getTransformation(posXCur, posYCur, posZCur, rotXCur, rotYCur, rotZCur);
+            cout << affineStart2Point.matrix() << endl;
             // Transform initialGuess to Camera 
-            Eigen::Affine3f transWorld2Start = pcl::getTransformation(cloudInfo.initialGuessX, cloudInfo.initialGuessY, cloudInfo.initialGuessZ,
+            Eigen::Affine3f affineWorld2Start = pcl::getTransformation(cloudInfo.initialGuessX, cloudInfo.initialGuessY, cloudInfo.initialGuessZ,
                                                             cloudInfo.initialGuessRoll, cloudInfo.initialGuessPitch, cloudInfo.initialGuessYaw);
-            Eigen::Affine3f transWorld2Cam = transWorld2Start * transStart2Point * affineL2C;
+            
+            affineW2C = affineWorld2Start * affineStart2Point * affineL2C;
             
             float camPosX, camPosY, camPosZ, camRoll, camPitch, camYaw;
-            pcl::getTranslationAndEulerAngles(transWorld2Cam, camPosX, camPosY, camPosZ, camRoll, camPitch, camYaw);
-            cout << transWorld2Cam.matrix() << endl;
+            pcl::getTranslationAndEulerAngles(affineW2C, camPosX, camPosY, camPosZ, camRoll, camPitch, camYaw);
+            cout << affineW2C.matrix() << endl;
             printf("camPosX: %f, camPosY: %f, camPosZ: %f\n", camPosX, camPosY, camPosZ);
             printf("camRoll: %f, camPitch: %f, camYaw: %f\n", camRoll, rotYCur, rotZCur);
             
@@ -794,12 +874,12 @@ public:
         depths.values.resize(pointFeature.points.size(), -1); // -1 for initial depth
 
         // TO-DO: cloudInfo LiDAR로 변경 필요
-        if (extractedCloud->size() == 0)
+        if (accumulatedCloud->size() == 0)
             return;
 
         // 1. Transform pointcloud to camera frame
-        pcl::PointCloud<PointType>::Ptr camCloud(new pcl::PointCloud<PointType>());
-        pcl::transformPointCloud(*extractedCloud, *camCloud, affineL2C.inverse());
+        pcl::PointCloud<PointType>::Ptr localCloud(new pcl::PointCloud<PointType>());
+        pcl::transformPointCloud(*accumulatedCloud, *localCloud, affineW2C.inverse());
         
         // 2. Project depth cloud on the range image and filter points in the same region
         int numBins = 360; 
@@ -810,9 +890,9 @@ public:
         float angRes = 180.0 / float(numBins); // cover only -90~90 FOV of the lidar 
         cv::Mat rangeImage = cv::Mat(numBins, numBins, CV_32F, cv::Scalar::all(FLT_MAX));
 
-        for (int i = 0; i < (int)camCloud->size(); ++i)
+        for (int i = 0; i < (int)localCloud->size(); ++i)
         {
-            PointType p = camCloud->points[i];
+            PointType p = localCloud->points[i];
             if (p.z > 0.0 && abs(p.y / p.z) < 10.0 && abs(p.x / p.z) < 10.0)
             {
                 // Horizontal: 0 [deg] (x > 0) ~ 180 [deg] (x < 0) w.r.t x-axis
@@ -836,31 +916,31 @@ public:
         }
 
         // 3. Extract cloud from the range image
-        pcl::PointCloud<PointType>::Ptr camCloudFiltered(new pcl::PointCloud<PointType>());
+        pcl::PointCloud<PointType>::Ptr localCloudFiltered(new pcl::PointCloud<PointType>());
         for (int i = 0; i < numBins; ++i)
         {
             for (int j = 0; j < numBins; ++j)
             {
                 if (rangeImage.at<float>(i,j) != FLT_MAX)
-                    camCloudFiltered->push_back(pointArray[i][j]);
+                    localCloudFiltered->push_back(pointArray[i][j]);
             }
         }
 
         // 4. Project pointcloud onto a unit sphere
-        pcl::PointCloud<PointType>::Ptr camCloudSphere(new pcl::PointCloud<PointType>());
-        for (int i = 0; i < (int)camCloudFiltered->size(); ++i)
+        pcl::PointCloud<PointType>::Ptr localCloudSphere(new pcl::PointCloud<PointType>());
+        for (int i = 0; i < (int)localCloudFiltered->size(); ++i)
         {
-            PointType p = camCloudFiltered->points[i];
+            PointType p = localCloudFiltered->points[i];
             float range = pointDistance(p);
             p.x /= range;
             p.y /= range;
             p.z /= range;
             p.intensity = range;
-            camCloudSphere->push_back(p);
+            localCloudSphere->push_back(p);
         }
 
         // TO-DO: cloudInfo LiDAR로 변경 필요
-        if (camCloudSphere->size() < 10) 
+        if (localCloudSphere->size() < 10) 
             return;
 
         // 5. Project 2D point feature to unit sphere
@@ -879,35 +959,39 @@ public:
 
         // 6. create kd-tree
         pcl::KdTreeFLANN<PointType>::Ptr kdTree(new pcl::KdTreeFLANN<PointType>());
-        kdTree->setInputCloud(camCloudSphere);
+        kdTree->setInputCloud(localCloudSphere);
 
         // 7. find feature depth using kd-tree
         vector<int> pointSearchIdx;
         vector<float> pointSearchSquaredDist;
-        float distThres = pow(sin(angRes / 180.0 * M_PI) * 5.0, 2);
+        float distThres = pow(sin(angRes / 180.0 * M_PI) * depthAssociateBinNumber, 2); 
+        printf("distThres: %f\n", distThres);
         for (int i = 0; i < (int)pointSphere->size(); ++i)
         {
             PointType p = pointSphere->points[i];
             kdTree->nearestKSearch(p, 3, pointSearchIdx, pointSearchSquaredDist);
             // Three nearest are found and the farthest is within the threshold
+            // DEBUG
+            printf("%d, uv: %f, %f, \n", i, pointFeature.points[i].x, pointFeature.points[i].y);
+            printf("dist: %f, %f, %f\n", pointSearchSquaredDist[0], pointSearchSquaredDist[1], pointSearchSquaredDist[2]);
             if (pointSearchIdx.size() == 3 && pointSearchSquaredDist[2] < distThres)
             {
-                float x0 = camCloudSphere->points[pointSearchIdx[0]].x;
-                float y0 = camCloudSphere->points[pointSearchIdx[0]].y;
-                float z0 = camCloudSphere->points[pointSearchIdx[0]].z;
-                float r0 = camCloudSphere->points[pointSearchIdx[0]].intensity;
+                float x0 = localCloudSphere->points[pointSearchIdx[0]].x;
+                float y0 = localCloudSphere->points[pointSearchIdx[0]].y;
+                float z0 = localCloudSphere->points[pointSearchIdx[0]].z;
+                float r0 = localCloudSphere->points[pointSearchIdx[0]].intensity;
                 Vector3f A(x0*r0, y0*r0, z0*r0);
 
-                float x1 = camCloudSphere->points[pointSearchIdx[1]].x;
-                float y1 = camCloudSphere->points[pointSearchIdx[1]].y;
-                float z1 = camCloudSphere->points[pointSearchIdx[1]].z;
-                float r1 = camCloudSphere->points[pointSearchIdx[1]].intensity;
+                float x1 = localCloudSphere->points[pointSearchIdx[1]].x;
+                float y1 = localCloudSphere->points[pointSearchIdx[1]].y;
+                float z1 = localCloudSphere->points[pointSearchIdx[1]].z;
+                float r1 = localCloudSphere->points[pointSearchIdx[1]].intensity;
                 Vector3f B(x1*r1, y1*r1, z1*r1);
 
-                float x2 = camCloudSphere->points[pointSearchIdx[2]].x;
-                float y2 = camCloudSphere->points[pointSearchIdx[2]].y;
-                float z2 = camCloudSphere->points[pointSearchIdx[2]].z;
-                float r2 = camCloudSphere->points[pointSearchIdx[2]].intensity;
+                float x2 = localCloudSphere->points[pointSearchIdx[2]].x;
+                float y2 = localCloudSphere->points[pointSearchIdx[2]].y;
+                float z2 = localCloudSphere->points[pointSearchIdx[2]].z;
+                float r2 = localCloudSphere->points[pointSearchIdx[2]].intensity;
                 Vector3f C(x2*r2, y2*r2, z2*r2);
 
                 Vector3f V(p.x, p.y, p.z);
@@ -990,82 +1074,43 @@ public:
 
         if (isFound)
         {
+            // project 3d to image plane
+            pcl::PointCloud<PointType>::Ptr localCloud(new pcl::PointCloud<PointType>());
+            pcl::transformPointCloud(*accumulatedCloud, *localCloud, affineW2C.inverse());
+            for (auto& point : localCloud->points)
+            {
+                if (point.z > 0)
+                {
+                    Vector3d spacePoint(point.x, point.y, point.z);
+                    float maxVal = 20.0;
+                    int red = min(255, (int)(255 * abs((point.z - maxVal) / maxVal)));
+                    int green = min(255, (int)(255 * (1 - abs((point.z - maxVal) / maxVal ))));
+                    Vector2d imagePoint;
+                    m_camera[0]->spaceToPlane(spacePoint, imagePoint);
+                    if (imagePoint.x() >= 0 && imagePoint.x() < m_camera[0]->imageWidth() && imagePoint.y() >=0 && imagePoint.y() < m_camera[0]->imageHeight())
+                    {
+                        // printf("3d: %f, %f, %f\n", point.x, point.y, point.z);
+                        // printf("uv: %f, %f\n", imagePoint.x(), imagePoint.y());
+                        // printf("red: %d, green %d\n", red, green);
+                        cv::Point2f uv(imagePoint.x(), imagePoint.y());
+                        cv::circle(cv_ptr->image, uv, 0.5, cv::Scalar(0, green, red), -1);
+                    }
+                }
+            }
+
             for (int i = 0; i < pointFeature.points.size(); ++i)
             {
                 cv::Point2f uv(pointFeature.points[i].x, pointFeature.points[i].y);
                 if (depths.values[i] >= 0)
                 {
-                    cv::circle(cv_ptr->image, uv, 3, cv::Scalar(0, 255, 0), 1);
+                    cv::circle(cv_ptr->image, uv, 3, cv::Scalar(0, 255, 0), -1);
                 }
                 else
                 {
-                    cv::circle(cv_ptr->image, uv, 3, cv::Scalar(0, 0, 255), 1);
+                    cv::circle(cv_ptr->image, uv, 3, cv::Scalar(0, 0, 255), -1);
                 }
             }
             pubProjectedImage.publish(cv_ptr->toImageMsg());
-        }
-    }
-
-    void visualizeProjection()
-    {
-        if (imgDeskewFlag)
-        {
-            // pop old images
-            cv_bridge::CvImagePtr cv_ptr;
-            bool isFound = false;
-            {
-                lock_guard<mutex> lock4(imgLock);
-                
-                while (!imgQueue.empty())
-                {
-                    if (imgQueue.front().first < imgDeskewTime)
-                    {
-                        imgQueue.pop_front();
-                    }
-                    else if (imgQueue.front().first == imgDeskewTime)
-                    {
-                        // cv::Mat grayImage = imgQueue.front().second;
-                        // cvtColor(grayImage, thisImage, CV_GRAY2RGB);
-                        sensor_msgs::Image thisImage = imgQueue.front().second;
-                        cv_ptr = cv_bridge::toCvCopy(thisImage, sensor_msgs::image_encodings::BGRA8);
-                        imgQueue.pop_front();
-                        isFound = true;
-                        printf("Found the image\n");
-                        break;
-                    }
-                }
-            }
-
-            if (isFound)
-            {
-                // project 3d to image plane
-                pcl::PointCloud<PointType>::Ptr transCloud(new pcl::PointCloud<PointType>());
-                pcl::transformPointCloud(*extractedCloud, *transCloud, affineL2C.inverse());
-                for (auto& point : transCloud->points)
-                {
-                    if (point.z > 0)
-                    {
-                        Vector3d spacePoint(point.x, point.y, point.z);
-                        float maxVal = 20.0;
-		                int red = min(255, (int)(255 * abs((point.z - maxVal) / maxVal)));
-		                int green = min(255, (int)(255 * (1 - abs((point.z - maxVal) / maxVal ))));
-                        Vector2d imagePoint;
-                        m_camera[0]->spaceToPlane(spacePoint, imagePoint);
-                        if (imagePoint.x() >= 0 && imagePoint.x() < m_camera[0]->imageWidth() && imagePoint.y() >=0 && imagePoint.y() < m_camera[0]->imageHeight())
-                        {
-                            // printf("3d: %f, %f, %f\n", point.x, point.y, point.z);
-                            // printf("uv: %f, %f\n", imagePoint.x(), imagePoint.y());
-                            // printf("red: %d, green %d\n", red, green);
-                            cv::Point2f uv(imagePoint.x(), imagePoint.y());
-                            cv::circle(cv_ptr->image, uv, 1, cv::Scalar(0, green, red), -1);
-                        }
-                    }
-                }
-
-                // publish to new topic
-                pubProjectedImage.publish(cv_ptr->toImageMsg());
-                publishCloud(&pubExtractedCloudCam, transCloud, cloudHeader.stamp, lidarFrame);
-            }
         }
     }
     

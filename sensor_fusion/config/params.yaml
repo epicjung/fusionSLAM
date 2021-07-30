@@ -18,6 +18,9 @@ fusion:
   combined:
     pointFeatureDistThres: 3.0 # [m]
     depthAssociateThres: 2.0 # [pixel]
+    depthAssociateBinNumber: 6 # number of bin threshold to associate
+    stackPointTime: 2.0
+    lidarSkip: 2
 
   imu:
     # IMU Settings

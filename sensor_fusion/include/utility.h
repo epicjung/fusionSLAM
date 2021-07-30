@@ -174,7 +174,10 @@ class ParamServer
 
 		// Feature
 		float depthAssociateThres;
+		int depthAssociateBinNumber;
 		float pointFeatureDistThres;
+		float stackPointTime;
+		int lidarSkip;
 
 	    // GPS Settings
 	    bool useImuHeadingInitialization;
@@ -321,8 +324,11 @@ class ParamServer
 
 	        nh.param<int>("fusion/estimateExtrinsic", ESTIMATE_EXTRINSIC, 1);
 			nh.param<float>("fusion/combined/depthAssociateThres", depthAssociateThres, 1.0);
+			nh.param<int>("fusion/combined/depthAssociateBinNumber", depthAssociateBinNumber, 2);			
 			nh.param<float>("fusion/combined/pointFeatureDistThres", pointFeatureDistThres, 1.0);
-	        nh.param<vector<double>>("fusion/camera/rotImu2Cam", extImuCamRot, vector<double>());
+			nh.param<float>("fusion/combined/stackPointTime", stackPointTime, 1.0);
+	        nh.param<int>("fusion/combined/lidarSkip", lidarSkip, 1);
+			nh.param<vector<double>>("fusion/camera/rotImu2Cam", extImuCamRot, vector<double>());
 	        nh.param<vector<double>>("fusion/camera/transImu2Cam", extImuCamTrans, vector<double>());
 	        
 			rotI2C = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extImuCamRot.data(), 3, 3);
@@ -457,13 +463,18 @@ class ParamServer
 			affineL2C = affineL2I * affineI2C;
 
 			// Test (Wonho)
-// 			Eigen::MatrixrotLidar2Cam 
+			vector<double> rotVec{3.2830966986177872e-04, -9.9771742228419513e-01, 5.9009091480326889e-04, 
+			-1.0695450518067135e-04, -5.9388257186973673e-04, -9.9817766066292501e-01, 
+			9.9940368967948490e-01, 3.2140009005520810e-04, -1.2620811232126291e-02};
 
-// 			[ 3.2830966986177872e-02, -9.9771742228419513e-01, 5.9009091480326889e-02, 100.0902978301338073e-04,
-// -1.0695450518067135e-02, -5.9388257186973673e-02, -9.9817766066292501e-01, -6.1939914048780222e-02,
-// 9.9940368967948490e-01, 3.2140009005520810e-02, -1.2620811232126291e-02, 4.4749064695750192e-02,
-// 0., 0., 0., 1. ]
+			vector<double> transVec{-0.13, -0.02, -0.18};
 
+	        Eigen::Matrix3d rotC2L = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(rotVec.data(), 3, 3);
+	        Eigen::Vector3d transC2L = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(transVec.data(), 3, 1);
+			ypr = rotC2L.eulerAngles(2, 1, 0);
+			Eigen::Affine3f affineC2L = pcl::getTransformation(transC2L.x(), transC2L.y(), transC2L.z(), ypr.z(), ypr.y(), ypr.x());
+			affineL2C = affineC2L.inverse();
+			
 			// test
 			printf("Utility.h\n");
 			cout << affineL2C.matrix() << endl;
