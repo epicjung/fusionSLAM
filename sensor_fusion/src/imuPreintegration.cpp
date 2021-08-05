@@ -69,11 +69,11 @@ public:
 
         // LaserOdometry는 map에서 feature matching을 통해 얻은 lidar odometry
         // ImuOdometry는 헷갈릴 수 있는데, imu 값으로 integrate한 lidar의 위치, not imu 위치
-        subLaserOdometry = nh.subscribe<nav_msgs::Odometry>("lio_sam/mapping/odometry", 5, &TransformFusion::lidarOdometryHandler, this, ros::TransportHints().tcpNoDelay());
+        subLaserOdometry = nh.subscribe<nav_msgs::Odometry>("fusion/mapping/odometry", 5, &TransformFusion::lidarOdometryHandler, this, ros::TransportHints().tcpNoDelay());
         subImuOdometry   = nh.subscribe<nav_msgs::Odometry>(odomTopic+"_incremental",   2000, &TransformFusion::imuOdometryHandler,   this, ros::TransportHints().tcpNoDelay());
 
         pubImuOdometry   = nh.advertise<nav_msgs::Odometry>(odomTopic, 2000);
-        pubImuPath       = nh.advertise<nav_msgs::Path>    ("lio_sam/imu/path", 1);
+        pubImuPath       = nh.advertise<nav_msgs::Path>    ("fusion/imu/path", 1);
     }
 
     // quaternion to rpy
@@ -232,7 +232,7 @@ public:
     IMUPreintegration()
     {
         subImu      = nh.subscribe<sensor_msgs::Imu>  (imuTopic,                   2000, &IMUPreintegration::imuHandler,      this, ros::TransportHints().tcpNoDelay());
-        subOdometry = nh.subscribe<nav_msgs::Odometry>("lio_sam/mapping/odometry_incremental", 5,    &IMUPreintegration::odometryHandler, this, ros::TransportHints().tcpNoDelay());
+        subOdometry = nh.subscribe<nav_msgs::Odometry>("fusion/mapping/odometry_incremental", 5,    &IMUPreintegration::odometryHandler, this, ros::TransportHints().tcpNoDelay());
 
         pubImuOdometry = nh.advertise<nav_msgs::Odometry> (odomTopic+"_incremental", 2000);
 
@@ -341,6 +341,7 @@ public:
             
             key = 1;
             systemInitialized = true;
+            ROS_WARN("imuPre: systemInitialized\n");
             return;
         }
 
@@ -395,6 +396,7 @@ public:
             else
                 break;
         }
+        ROS_WARN("imuPre: Optimize\n");
         // add imu factor to graph
         const gtsam::PreintegratedImuMeasurements& preint_imu = dynamic_cast<const gtsam::PreintegratedImuMeasurements&>(*imuIntegratorOpt_);
         gtsam::ImuFactor imu_factor(X(key - 1), V(key - 1), X(key), V(key), B(key - 1), preint_imu);
@@ -423,6 +425,7 @@ public:
         prevVel_   = result.at<gtsam::Vector3>(V(key));
         prevState_ = gtsam::NavState(prevPose_, prevVel_);
         prevBias_  = result.at<gtsam::imuBias::ConstantBias>(B(key));
+        printf("Opt imu pose: %f, %f, %f\n", prevPose_.translation().x(), prevPose_.translation().y(), prevPose_.translation().z());
         // Reset the optimization preintegration object.
         imuIntegratorOpt_->resetIntegrationAndSetBias(prevBias_);
         // check optimization
@@ -462,6 +465,7 @@ public:
         }
 
         ++key;
+        ROS_WARN("imuPre: doneFirstOptimization\n");
         doneFirstOpt = true;
     }
 
@@ -531,6 +535,9 @@ public:
 
         // transform imu pose to ldiar
         gtsam::Pose3 imuPose = gtsam::Pose3(currentState.quaternion(), currentState.position());
+        printf("imuHandler -- imuPose: %f, %f, %f, imuOri: %f, %f, %f, %f\n", 
+        imuPose.translation().x(), imuPose.translation().y(), imuPose.translation().z(),
+        imuPose.rotation().toQuaternion().x(), imuPose.rotation().toQuaternion().y(), imuPose.rotation().toQuaternion().z(), imuPose.rotation().toQuaternion().w());
         //imuPose 자체는 imu 값을 lidar 기준으로 Rotation만 시켜서 얻은 pose이기 때문에 translation (imu2Lidar)을 곱해줘야 함
         gtsam::Pose3 lidarPose = imuPose.compose(imu2Lidar); 
 
@@ -542,6 +549,10 @@ public:
         odometry.pose.pose.orientation.z = lidarPose.rotation().toQuaternion().z();
         odometry.pose.pose.orientation.w = lidarPose.rotation().toQuaternion().w();
         
+        printf("imuHandler -- lidarPose: %f, %f, %f, imuOri: %f, %f, %f, %f\n", 
+        lidarPose.translation().x(), lidarPose.translation().y(), lidarPose.translation().z(),
+        lidarPose.rotation().toQuaternion().x(), lidarPose.rotation().toQuaternion().y(), lidarPose.rotation().toQuaternion().z(), lidarPose.rotation().toQuaternion().w());
+
         odometry.twist.twist.linear.x = currentState.velocity().x();
         odometry.twist.twist.linear.y = currentState.velocity().y();
         odometry.twist.twist.linear.z = currentState.velocity().z();
@@ -549,6 +560,7 @@ public:
         odometry.twist.twist.angular.y = thisImu.angular_velocity.y + prevBiasOdom.gyroscope().y();
         odometry.twist.twist.angular.z = thisImu.angular_velocity.z + prevBiasOdom.gyroscope().z();
         pubImuOdometry.publish(odometry); //map-optimized된 lidar odometry(prevStateOdom) + imu_integration한 odometry = CurrentState
+        ROS_WARN("imuPre: publish odometry_incremental\n");
 
         // Topic "imu_incremental"
     }
@@ -564,7 +576,8 @@ int main(int argc, char** argv)
     TransformFusion TF;
 
     ROS_INFO("\033[1;32m----> IMU Preintegration Started.\033[0m");
-    
+    signal(SIGINT, signal_handle::signal_callback_handler);
+
     ros::MultiThreadedSpinner spinner(4);
     spinner.spin();
     

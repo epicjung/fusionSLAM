@@ -83,6 +83,9 @@ private:
     vector<camodocal::CameraPtr> m_camera;
 
 
+    // test
+    map<int, vector<int>> threeNearest;
+
 public:
     ImageProjection():
     deskewFlag(0)
@@ -90,12 +93,12 @@ public:
         subImu        = nh.subscribe<sensor_msgs::Imu>(imuTopic, 2000, &ImageProjection::imuHandler, this, ros::TransportHints().tcpNoDelay());
         subOdom       = nh.subscribe<nav_msgs::Odometry>(odomTopic+"_incremental", 2000, &ImageProjection::odometryHandler, this, ros::TransportHints().tcpNoDelay());
         subLaserCloud = nh.subscribe<sensor_msgs::PointCloud2>(cloudTopic, 5, &ImageProjection::cloudHandler, this, ros::TransportHints().tcpNoDelay());
-        subUV         = nh.subscribe<sensor_msgs::PointCloud>("/sensor_fusion/visual/tracked_feature", 1000, &ImageProjection::uvHandler, this, ros::TransportHints().tcpNoDelay());
+        subUV         = nh.subscribe<sensor_msgs::PointCloud>("/fusion/visual/tracked_feature", 1000, &ImageProjection::uvHandler, this, ros::TransportHints().tcpNoDelay());
         subImage      = nh.subscribe<sensor_msgs::Image>(imgTopic, 1000, &ImageProjection::imgHandler, this, ros::TransportHints().tcpNoDelay());
-        pubExtractedCloud = nh.advertise<sensor_msgs::PointCloud2> ("lio_sam/deskew/cloud_deskewed", 1);
-        pubExtractedCloudCam = nh.advertise<sensor_msgs::PointCloud2>("lio_sam/deskew/cam_deskewed", 1);
+        pubExtractedCloud = nh.advertise<sensor_msgs::PointCloud2> ("fusion/deskew/cloud_deskewed", 1);
+        pubExtractedCloudCam = nh.advertise<sensor_msgs::PointCloud2>("fusion/deskew/cam_deskewed", 1);
         pubProjectedImage = nh.advertise<sensor_msgs::Image>("projected_img", 1);
-        pubLaserCloudInfo = nh.advertise<sensor_fusion::cloud_info> ("lio_sam/deskew/cloud_info", 1);
+        pubLaserCloudInfo = nh.advertise<sensor_fusion::cloud_info> ("fusion/deskew/cloud_info", 1);
 
         allocateMemory();
         resetParameters();
@@ -143,22 +146,7 @@ public:
             imuRotZ[i] = 0;
         }
 
-        // get camera info
-        for (size_t i = 0; i < CAM_NAMES.size(); i++)
-        {
-            ROS_DEBUG("reading paramerter of camera %s", CAM_NAMES[i].c_str());
-            FILE *fh = fopen(CAM_NAMES[i].c_str(), "r");
-            if (fh == NULL)
-            {
-                ROS_WARN("config_file doesn't exist");
-                ROS_BREAK();
-                return;
-            }
-            fclose(fh);
 
-            camodocal::CameraPtr camera = camodocal::CameraFactory::instance()->generateCameraFromYamlFile(CAM_NAMES[i]);
-            m_camera.push_back(camera);
-        }
     }
 
     ~ImageProjection(){}
@@ -257,6 +245,8 @@ public:
     void stackPointCloud()
     {
         TicToc tictoc;
+
+        lock_guard<mutex> lock(lidarLock);
 
         static int lidarCount = -1;
         // TO-DO: this should modified to stack the pointcloud even if there is no image to deskew
@@ -481,6 +471,13 @@ public:
 
         odomDeskewInfo(); // odom을 사용하여 translation에 대한 deskewing
 
+        imgDeskewFlag = (imuPointerImg > 0 && cloudInfo.odomAvailable) ? true : false; // imgDeskew only when odom is available
+
+        if (imgDeskewFlag)
+            printf ("\033[32;1m Image Deskew \033[0m\n");
+        else
+            printf ("\033[31;1m No Image Deskew \033[0m\n");
+
         return true;
     }
 
@@ -509,11 +506,6 @@ public:
             sensor_msgs::Imu thisImuMsg = imuQueue[i];
             double currentImuTime = thisImuMsg.header.stamp.toSec();
 
-            // Convert imu measurements to camera frame or lider frame
-            if (imgDeskewTime > 0)
-            {
-            }
-
             // get roll, pitch, and yaw estimation for this scan
             // timeScanCur보다 이전이지만 제일 가까운 Imu 값의 orientation을 현재 lidar의 init orientation으로 놓는다. 
             if (currentImuTime <= timeScanCur)
@@ -531,9 +523,15 @@ public:
                 continue;
             }
 
-            if (imgDeskewTime > 0 && currentImuTime > imgDeskewTime)
+            if (imgDeskewTime > 0)
             {
-                imuPointerImg = imuPointerCur;
+                if (currentImuTime <= imgDeskewTime)
+                    imuRPY2rosRPY(&thisImuMsg, &cloudInfo.imuRollInit, &cloudInfo.imuPitchInit, &cloudInfo.imuYawInit);
+                else
+                {
+                    if (imuPointerImg == 0)
+                        imuPointerImg = imuPointerCur;
+                }
             }
 
             // get angular velocity
@@ -554,9 +552,8 @@ public:
         if (imuPointerCur <= 0)
             return;
 
-        imgDeskewFlag = imuPointerImg > 0 ? true : false; 
         cloudInfo.imuAvailable = true;
-        printf("imuPointerImag: %d\n", imuPointerImg);
+        printf("imuPointerImage: %d, imuPointerCur: %d\n", imuPointerImg, imuPointerCur);
     }
 
     void odomDeskewInfo()
@@ -604,7 +601,6 @@ public:
         double roll, pitch, yaw;
         tf::Matrix3x3(orientation).getRPY(roll, pitch, yaw);
 
-        ROS_WARN("imageProjection: initial guess");
         // Initial guess used in mapOptimization
         cloudInfo.initialGuessX = startOdomMsg.pose.pose.position.x;
         cloudInfo.initialGuessY = startOdomMsg.pose.pose.position.y;
@@ -721,14 +717,11 @@ public:
         Eigen::Affine3f transCur = pcl::getTransformation(posXCur, posYCur, posZCur, rotXCur, rotYCur, rotZCur);
         Eigen::Affine3f transBt;
         
-
         if (imgDeskewFlag) // transform points to camera
         {
             transBt = affineL2C.inverse() * affineStart2Point.inverse() * transCur;
-            cloudInfo.isCloud = false;
         } else { // transform poitns to start
             transBt = transStartInverse * transCur;
-            cloudInfo.isCloud = true;
         }
 
         PointType newPoint;
@@ -745,6 +738,7 @@ public:
         // get transformation from timeScanCur to camera pose
         if (imgDeskewFlag)
         {
+            // find rotation
             int prevPointer = imuPointerImg - 1;
             double ratioFront = (imgDeskewTime - imuTime[prevPointer]) / (imuTime[imuPointerImg] - imuTime[prevPointer]);
             double ratioBack = (imuTime[imuPointerImg] - imgDeskewTime) / (imuTime[imuPointerImg] - imuTime[prevPointer]);
@@ -753,6 +747,8 @@ public:
             float rotZCur = imuRotZ[imuPointerImg] * ratioFront + imuRotZ[prevPointer] * ratioBack;
             float posXCur, posYCur, posZCur;
             double relTime = imgDeskewTime - timeScanCur;
+
+            //find position
             findPosition(relTime, &posXCur, &posYCur, &posZCur);
 
             ROS_WARN("Image Deskewing...");
@@ -768,13 +764,26 @@ public:
                                                             cloudInfo.initialGuessRoll, cloudInfo.initialGuessPitch, cloudInfo.initialGuessYaw);
             
             affineW2C = affineWorld2Start * affineStart2Point * affineL2C;
-            
+                    
+            ROS_WARN("imageProjection: initial guess");
+            float initX, initY, initZ, initRoll, initPitch, initYaw;
+            pcl::getTranslationAndEulerAngles(affineWorld2Start, initX, initY, initZ, initRoll, initPitch, initYaw);
+            printf("ScanStartTime: %f\n", timeScanCur);
+            printf("initX: %f, initY: %f, initZ: %f\n", initX, initY, initZ);
+            printf("initRoll: %f, initPitch: %f, initYaw: %f\n", initRoll, initPitch, initYaw);            
+
             float camPosX, camPosY, camPosZ, camRoll, camPitch, camYaw;
             pcl::getTranslationAndEulerAngles(affineW2C, camPosX, camPosY, camPosZ, camRoll, camPitch, camYaw);
             cout << affineW2C.matrix() << endl;
             printf("camPosX: %f, camPosY: %f, camPosZ: %f\n", camPosX, camPosY, camPosZ);
-            printf("camRoll: %f, camPitch: %f, camYaw: %f\n", camRoll, rotYCur, rotZCur);
+            printf("camRoll: %f, camPitch: %f, camYaw: %f\n", camRoll, camPitch, camYaw);
             
+            // tmp
+            Eigen::Affine3f imuInitRPY = pcl::getTransformation(0.0, 0.0, 0.0, cloudInfo.imuRollInit, cloudInfo.imuPitchInit, cloudInfo.imuYawInit);
+            imuInitRPY = imuInitRPY * affineL2C;
+            float x,y,z;
+            pcl::getTranslationAndEulerAngles(imuInitRPY, x, y, z, cloudInfo.imuRollInit, cloudInfo.imuPitchInit, cloudInfo.imuYawInit);
+
             // Send transform
             // Change timestamp for the pointcloud
             ros::Time rosTime(imgDeskewTime);
@@ -786,6 +795,7 @@ public:
             cloudInfo.initialGuessRoll  = camRoll;
             cloudInfo.initialGuessPitch = camPitch;
             cloudInfo.initialGuessYaw   = camYaw;
+            cloudInfo.isCloud = false;
         }
 
         int cloudSize = laserCloudIn->points.size();
@@ -858,11 +868,6 @@ public:
             }
             cloudInfo.endRingIndex[i] = count -1 - 5;
         }
-    }
-
-    sensor_msgs::ChannelFloat32 getDepth()
-    {
-
     }
 
     void associatePointFeature()
@@ -961,19 +966,22 @@ public:
         pcl::KdTreeFLANN<PointType>::Ptr kdTree(new pcl::KdTreeFLANN<PointType>());
         kdTree->setInputCloud(localCloudSphere);
 
+        pcl::PointCloud<PointType>::Ptr threePoints(new pcl::PointCloud<PointType>());
+        
         // 7. find feature depth using kd-tree
         vector<int> pointSearchIdx;
         vector<float> pointSearchSquaredDist;
         float distThres = pow(sin(angRes / 180.0 * M_PI) * depthAssociateBinNumber, 2); 
-        printf("distThres: %f\n", distThres);
         for (int i = 0; i < (int)pointSphere->size(); ++i)
         {
             PointType p = pointSphere->points[i];
             kdTree->nearestKSearch(p, 3, pointSearchIdx, pointSearchSquaredDist);
             // Three nearest are found and the farthest is within the threshold
             // DEBUG
-            printf("%d, uv: %f, %f, \n", i, pointFeature.points[i].x, pointFeature.points[i].y);
-            printf("dist: %f, %f, %f\n", pointSearchSquaredDist[0], pointSearchSquaredDist[1], pointSearchSquaredDist[2]);
+            threePoints->push_back(localCloudSphere->points[pointSearchIdx[0]]);      
+            threePoints->push_back(localCloudSphere->points[pointSearchIdx[1]]);      
+            threePoints->push_back(localCloudSphere->points[pointSearchIdx[2]]);      
+
             if (pointSearchIdx.size() == 3 && pointSearchSquaredDist[2] < distThres)
             {
                 float x0 = localCloudSphere->points[pointSearchIdx[0]].x;
@@ -1014,9 +1022,9 @@ public:
                 pointSphere->points[i].y *= depth;
                 pointSphere->points[i].z *= depth;
                 pointSphere->points[i].intensity = pointSphere->points[i].z;
-                
+            
                 // update 3D point feature (sensor_msgs::PointCloud)
-                if (pointSphere->points[i].intensity > pointFeatureDistThres)
+                if (pointSphere->points[i].intensity > lidarMinRange && pointSphere->points[i].intensity < lidarMaxRange)
                 {
                     depths.values[i] = pointSphere->points[i].intensity;
                     pointFeature.channels[1].values[i] = pointSphere->points[i].x;
@@ -1025,6 +1033,8 @@ public:
                 }
             }
         }
+
+        publishCloud(&pubExtractedCloudCam, threePoints, cloudInfo.header.stamp, camFrame);
 
         visualizeAssociatedPoints(depths);
 
@@ -1100,7 +1110,7 @@ public:
 
             for (int i = 0; i < pointFeature.points.size(); ++i)
             {
-                cv::Point2f uv(pointFeature.points[i].x, pointFeature.points[i].y);
+                cv::Point2f uv(pointFeature.channels[4].values[i], pointFeature.channels[5].values[i]);
                 if (depths.values[i] >= 0)
                 {
                     cv::circle(cv_ptr->image, uv, 3, cv::Scalar(0, 255, 0), -1);
@@ -1128,6 +1138,8 @@ int main(int argc, char** argv)
 
     ImageProjection IP;
     
+    signal(SIGINT, signal_handle::signal_callback_handler);
+
     ROS_INFO("\033[1;32m----> Image Projection Started.\033[0m");
 
     ros::MultiThreadedSpinner spinner(2);

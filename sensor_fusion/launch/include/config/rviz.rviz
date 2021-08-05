@@ -1,6 +1,6 @@
 Panels:
   - Class: rviz/Displays
-    Help Height: 191
+    Help Height: 0
     Name: Displays
     Property Tree Widget:
       Expanded:
@@ -14,8 +14,11 @@ Panels:
         - /Mapping1
         - /GPS1/Path (GPS)1
         - /GPS1/Odometry (GPS)1
+        - /Sensor Fusion1
+        - /Sensor Fusion1/Cam1
+        - /Sensor Fusion1/initial_path1
       Splitter Ratio: 0.5600000023841858
-    Tree Height: 348
+    Tree Height: 474
   - Class: rviz/Selection
     Name: Selection
   - Class: rviz/Views
@@ -58,19 +61,19 @@ Visualization Manager:
           Update Interval: 0
           Value: false
         - Class: rviz/Axes
-          Enabled: true
+          Enabled: false
           Length: 2
           Name: map
           Radius: 0.5
           Reference Frame: map
-          Value: true
+          Value: false
         - Class: rviz/Axes
-          Enabled: false
+          Enabled: true
           Length: 1
           Name: base_link
           Radius: 0.30000001192092896
           Reference Frame: base_link
-          Value: false
+          Value: true
         - Class: rviz/Axes
           Enabled: false
           Length: 1
@@ -362,7 +365,7 @@ Visualization Manager:
           Color: 255; 255; 255
           Color Transformer: Intensity
           Decay Time: 300
-          Enabled: true
+          Enabled: false
           Invert Rainbow: false
           Max Color: 255; 255; 255
           Max Intensity: 128
@@ -379,7 +382,7 @@ Visualization Manager:
           Unreliable: false
           Use Fixed Frame: true
           Use rainbow: true
-          Value: true
+          Value: false
         - Alpha: 1
           Autocompute Intensity Bounds: true
           Autocompute Value Bounds:
@@ -517,14 +520,13 @@ Visualization Manager:
           Use rainbow: true
           Value: false
         - Class: rviz/MarkerArray
-          Enabled: true
+          Enabled: false
           Marker Topic: /lio_sam/mapping/loop_closure_constraints
           Name: Loop constraint
           Namespaces:
-            loop_edges: true
-            loop_nodes: true
+            {}
           Queue Size: 100
-          Value: true
+          Value: false
       Enabled: true
       Name: Mapping
     - Alpha: 0.5
@@ -544,18 +546,6 @@ Visualization Manager:
       Plane: XY
       Plane Cell Count: 50
       Reference Frame: <Fixed Frame>
-      Value: true
-    - Class: rviz/Image
-      Enabled: true
-      Image Topic: /out
-      Max Value: 1
-      Median window: 5
-      Min Value: 0
-      Name: Image
-      Normalize Range: true
-      Queue Size: 2
-      Transport Hint: compressed
-      Unreliable: false
       Value: true
     - Alpha: 1
       Autocompute Intensity Bounds: true
@@ -627,8 +617,127 @@ Visualization Manager:
           Topic: /gps/pose
           Unreliable: false
           Value: true
-      Enabled: true
+      Enabled: false
       Name: GPS
+    - Class: rviz/Group
+      Displays:
+        - Alpha: 1
+          Autocompute Intensity Bounds: true
+          Autocompute Value Bounds:
+            Max Value: 10
+            Min Value: -10
+            Value: true
+          Axis: Z
+          Channel Name: intensity
+          Class: rviz/PointCloud2
+          Color: 255; 255; 255
+          Color Transformer: Intensity
+          Decay Time: 0
+          Enabled: true
+          Invert Rainbow: false
+          Max Color: 255; 255; 255
+          Max Intensity: 30.440452575683594
+          Min Color: 0; 0; 0
+          Min Intensity: 3.4948689937591553
+          Name: PointCloud2
+          Position Transformer: XYZ
+          Queue Size: 10
+          Selectable: true
+          Size (Pixels): 3
+          Size (m): 0.10000000149011612
+          Style: Flat Squares
+          Topic: /fusion/deskew/cam_deskewed
+          Unreliable: false
+          Use Fixed Frame: true
+          Use rainbow: true
+          Value: true
+        - Class: rviz/MarkerArray
+          Enabled: true
+          Marker Topic: /fusion/feature/point_landmark
+          Name: 3D_points
+          Namespaces:
+            {}
+          Queue Size: 100
+          Value: true
+        - Class: rviz/Image
+          Enabled: true
+          Image Topic: /fusion/feature/test_image
+          Max Value: 1
+          Median window: 5
+          Min Value: 0
+          Name: test
+          Normalize Range: true
+          Queue Size: 2
+          Transport Hint: raw
+          Unreliable: false
+          Value: true
+        - Class: rviz/Image
+          Enabled: true
+          Image Topic: /projected_img
+          Max Value: 1
+          Median window: 5
+          Min Value: 0
+          Name: Projection
+          Normalize Range: true
+          Queue Size: 2
+          Transport Hint: raw
+          Unreliable: false
+          Value: true
+        - Class: rviz/Axes
+          Enabled: true
+          Length: 1
+          Name: Cam
+          Radius: 0.10000000149011612
+          Reference Frame: fusion_cam
+          Value: true
+        - Alpha: 1
+          Buffer Length: 1
+          Class: rviz/Path
+          Color: 255; 25; 0
+          Enabled: true
+          Head Diameter: 0.30000001192092896
+          Head Length: 0.20000000298023224
+          Length: 0.30000001192092896
+          Line Style: Billboards
+          Line Width: 0.10000000149011612
+          Name: global_path
+          Offset:
+            X: 0
+            Y: 0
+            Z: 0
+          Pose Color: 255; 85; 255
+          Pose Style: None
+          Radius: 0.029999999329447746
+          Shaft Diameter: 0.10000000149011612
+          Shaft Length: 0.10000000149011612
+          Topic: /fusion/mapping/path
+          Unreliable: false
+          Value: true
+        - Alpha: 1
+          Buffer Length: 1
+          Class: rviz/Path
+          Color: 255; 0; 248
+          Enabled: true
+          Head Diameter: 0.30000001192092896
+          Head Length: 0.20000000298023224
+          Length: 0.30000001192092896
+          Line Style: Billboards
+          Line Width: 0.10000000149011612
+          Name: initial_path
+          Offset:
+            X: 0
+            Y: 0
+            Z: 0
+          Pose Color: 255; 85; 255
+          Pose Style: None
+          Radius: 0.029999999329447746
+          Shaft Diameter: 0.10000000149011612
+          Shaft Length: 0.10000000149011612
+          Topic: /fusion/mapping/initial_path
+          Unreliable: false
+          Value: true
+      Enabled: true
+      Name: Sensor Fusion
   Enabled: true
   Global Options:
     Background Color: 0; 0; 0
@@ -645,25 +754,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 26.112430572509766
+      Distance: 31.221200942993164
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: -2.6584160327911377
-        Y: 3.8334314823150635
-        Z: -0.08847753703594208
+        X: 3.4587390422821045
+        Y: -1.3419086933135986
+        Z: -0.8597434759140015
       Focal Shape Fixed Size: false
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 1.4297953844070435
+      Pitch: 1.5647963285446167
       Target Frame: map
       Value: Orbit (rviz)
-      Yaw: 4.6098713874816895
+      Yaw: 3.0848472118377686
     Saved: ~
 Window Geometry:
   Displays:
@@ -671,9 +780,9 @@ Window Geometry:
   Height: 1004
   Hide Left Dock: false
   Hide Right Dock: false
-  Image:
+  Projection:
     collapsed: false
-  QMainWindow State: 000000ff00000000fd0000000400000000000002c700000392fc020000000afb0000001200530065006c0065006300740069006f006e00000001e10000009b0000005c00fffffffb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb0000000a0049006d006100670065010000003d000001340000001600fffffffb000000100044006900730070006c006100790073010000017700000258000000c900fffffffb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c00000261fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730000000286000000a70000005c00fffffffb0000000a0049006d0061006700650100000305000000ca0000000000000000000000010000011100000392fc0200000003fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a00560069006500770073010000003d00000392000000a400fffffffb0000001200530065006c0065006300740069006f006e010000025a000000b200000000000000000000000200000490000000a9fc0100000001fb0000000a00560069006500770073030000004e00000080000002e10000019700000003000004b000000040fc0100000002fb0000000800540069006d00650000000000000004b00000000000000000fb0000000800540069006d006501000000000000045000000000000000000000039c0000039200000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd00000004000000000000039200000392fc020000000bfb0000001200530065006c0065006300740069006f006e00000001e10000009b0000005c00fffffffb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb000000080074006500730074010000003d0000018d0000001600fffffffb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c00000261fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730000000286000000a70000005c00fffffffb0000001400500072006f006a0065006300740069006f006e01000001d0000001ff0000001600fffffffb0000000a0049006d00610067006501000001ff000001d00000000000000000fb0000000a0049006d00610067006501000002ac000001230000000000000000000000010000015600000392fc0200000004fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a00560069006500770073010000003d00000175000000a400fffffffb000000100044006900730070006c00610079007301000001b800000217000000c900fffffffb0000001200530065006c0065006300740069006f006e010000025a000000b200000000000000000000000200000490000000a9fc0100000001fb0000000a00560069006500770073030000004e00000080000002e10000019700000003000004b000000040fc0100000002fb0000000800540069006d00650000000000000004b00000000000000000fb0000000800540069006d006501000000000000045000000000000000000000028c0000039200000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Selection:
     collapsed: false
   Tool Properties:
@@ -683,3 +792,5 @@ Window Geometry:
   Width: 1920
   X: 0
   Y: 0
+  test:
+    collapsed: false

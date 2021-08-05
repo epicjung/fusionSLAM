@@ -6,10 +6,12 @@
 #include <ros/package.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
+#include <string.h>
 
 #include "sensor_fusion/cloud_info.h"
 #include "sensor_fusion/save_map.h"
 #include "tic_toc.h"
+#include "signal_handler.h"
 
 #include <std_msgs/Header.h>
 #include <std_msgs/Float64MultiArray.h>
@@ -173,11 +175,14 @@ class ParamServer
         string odometryFrame;
 
 		// Feature
-		float depthAssociateThres;
+		float projectionErrorThres;
 		int depthAssociateBinNumber;
 		float pointFeatureDistThres;
 		float stackPointTime;
 		int lidarSkip;
+
+		// Optimization
+		float timeLag;
 
 	    // GPS Settings
 	    bool useImuHeadingInitialization;
@@ -261,7 +266,7 @@ class ParamServer
 
 	    string calibFile;
 		float FOCAL_LENGTH;
-	    // int WINDOW_SIZE;
+	    int WINDOW_SIZE;
 	    int NUM_OF_F;
 
 		double INIT_DEPTH;
@@ -323,14 +328,15 @@ class ParamServer
 			nh.param<std::string>("fusion/odometryFrame", odometryFrame, "odom");
 
 	        nh.param<int>("fusion/estimateExtrinsic", ESTIMATE_EXTRINSIC, 1);
-			nh.param<float>("fusion/combined/depthAssociateThres", depthAssociateThres, 1.0);
+			nh.param<float>("fusion/combined/projectionErrorThres", projectionErrorThres, 1.0);
 			nh.param<int>("fusion/combined/depthAssociateBinNumber", depthAssociateBinNumber, 2);			
 			nh.param<float>("fusion/combined/pointFeatureDistThres", pointFeatureDistThres, 1.0);
 			nh.param<float>("fusion/combined/stackPointTime", stackPointTime, 1.0);
 	        nh.param<int>("fusion/combined/lidarSkip", lidarSkip, 1);
 			nh.param<vector<double>>("fusion/camera/rotImu2Cam", extImuCamRot, vector<double>());
 	        nh.param<vector<double>>("fusion/camera/transImu2Cam", extImuCamTrans, vector<double>());
-	        
+	        nh.param<float>("fusion/optimization/timeLag", timeLag, 2.0);
+
 			rotI2C = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extImuCamRot.data(), 3, 3);
 	        transI2C = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extImuCamTrans.data(), 3, 1);
 
@@ -432,7 +438,7 @@ class ParamServer
 	        CAM_NAMES.push_back(camPath);
 
 	        nh.param<float>("fusion/camera/focalLength", FOCAL_LENGTH, 460.0);
-	        // nh.param<int>("fusion/camera/windowSize", WINDOW_SIZE, 10);
+	        nh.param<int>("fusion/camera/windowSize", WINDOW_SIZE, 10);
 	        nh.param<int>("fusion/camera/numOfF", NUM_OF_F, 1000);
 
 	        nh.param<double>("fusion/camera/initDepth", INIT_DEPTH, 1.0);

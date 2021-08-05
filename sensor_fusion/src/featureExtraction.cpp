@@ -1,5 +1,10 @@
 #include "utility.h"
 
+
+#include "camodocal/camera_models/CameraFactory.h"
+#include "camodocal/camera_models/CataCamera.h"
+#include "camodocal/camera_models/PinholeCamera.h"
+
 struct smoothness_t{ 
     float value;
     size_t ind;
@@ -38,11 +43,11 @@ public:
 
     FeatureExtraction()
     {
-        subLaserCloudInfo = nh.subscribe<sensor_fusion::cloud_info>("lio_sam/deskew/cloud_info", 1, &FeatureExtraction::laserCloudInfoHandler, this, ros::TransportHints().tcpNoDelay());
+        subLaserCloudInfo = nh.subscribe<sensor_fusion::cloud_info>("fusion/deskew/cloud_info", 1, &FeatureExtraction::laserCloudInfoHandler, this, ros::TransportHints().tcpNoDelay());
 
-        pubLaserCloudInfo = nh.advertise<sensor_fusion::cloud_info> ("lio_sam/feature/cloud_info", 1);
-        pubCornerPoints = nh.advertise<sensor_msgs::PointCloud2>("lio_sam/feature/cloud_corner", 1);
-        pubSurfacePoints = nh.advertise<sensor_msgs::PointCloud2>("lio_sam/feature/cloud_surface", 1);
+        pubLaserCloudInfo = nh.advertise<sensor_fusion::cloud_info> ("fusion/feature/cloud_info", 1);
+        pubCornerPoints = nh.advertise<sensor_msgs::PointCloud2>("fusion/feature/cloud_corner", 1);
+        pubSurfacePoints = nh.advertise<sensor_msgs::PointCloud2>("fusion/feature/cloud_surface", 1);
         
         initializationValue();
     }
@@ -259,7 +264,7 @@ public:
 
 int main(int argc, char** argv)
 {
-    ros::init(argc, argv, "lio_sam");
+    ros::init(argc, argv, "sensor_fusion");
 
     FeatureExtraction FE;
 

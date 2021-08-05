@@ -1,5 +1,4 @@
 #include "utility.h"
-#include "tic_toc.h"
 
 #include <cstdio>
 #include <iostream>
@@ -53,7 +52,7 @@ class VisualFeature : public ParamServer
         VisualFeature()
         {
             subImg        = nh.subscribe<sensor_msgs::Image>(imgTopic, 1000, &VisualFeature::imgHandler, this, ros::TransportHints().tcpNoDelay());
-            pubUV         = nh.advertise<sensor_msgs::PointCloud>("/sensor_fusion/visual/tracked_feature", 1000);
+            pubUV         = nh.advertise<sensor_msgs::PointCloud>("/fusion/visual/tracked_feature", 1000);
             stereo_cam = 0;
             n_id = 0;
             hasPrediction = false;
@@ -89,7 +88,7 @@ class VisualFeature : public ParamServer
                     featuresMsg.header.stamp = rosImage.header.stamp;
                     featuresMsg.header.frame_id = "image";
                     featuresMsg.points.resize(numPoints);
-                    featuresMsg.channels.resize(4);
+                    featuresMsg.channels.resize(6);
                     featuresMsg.channels[0].name = "feature_id";
                     featuresMsg.channels[0].values.resize(numPoints);
                     featuresMsg.channels[1].name = "X";
@@ -97,18 +96,24 @@ class VisualFeature : public ParamServer
                     featuresMsg.channels[2].name = "Y";
                     featuresMsg.channels[2].values.resize(numPoints);
                     featuresMsg.channels[3].name = "Z";
+                    featuresMsg.channels[3].values.resize(numPoints);
+                    featuresMsg.channels[4].name = "u";
                     featuresMsg.channels[4].values.resize(numPoints);
+                    featuresMsg.channels[5].name = "v";
+                    featuresMsg.channels[5].values.resize(numPoints);
                     int cnt = 0;
                     for(auto it = featureFrame.begin(); it != featureFrame.end(); ++it)
                     {
                         int id = it->first;
                         Eigen::Matrix<double, 7, 1> xyz_uv_vel = it->second[0].second;
-                        featuresMsg.points[cnt].x = float(xyz_uv_vel(3, 0));
-                        featuresMsg.points[cnt].y = float(xyz_uv_vel(4, 0));
+                        featuresMsg.points[cnt].x = float(xyz_uv_vel(0, 0));
+                        featuresMsg.points[cnt].y = float(xyz_uv_vel(1, 0));
                         featuresMsg.channels[0].values[cnt] = float(id);
-                        featuresMsg.channels[1].values[cnt] = float('inf');
-                        featuresMsg.channels[1].values[cnt] = float('inf');
-                        featuresMsg.channels[1].values[cnt] = float('inf');
+                        featuresMsg.channels[1].values[cnt] = 0.0;
+                        featuresMsg.channels[2].values[cnt] = 0.0;
+                        featuresMsg.channels[3].values[cnt] = 0.0;
+                        featuresMsg.channels[4].values[cnt] = float(xyz_uv_vel(3, 0));
+                        featuresMsg.channels[5].values[cnt] = float(xyz_uv_vel(4, 0));
                         cnt++;
                     }
                     pubUV.publish(featuresMsg);
@@ -698,7 +703,8 @@ int main(int argc, char** argv)
     tracker.setParameter();
 
     ROS_INFO("\033[1;32m----> Visual Feature Tracker Started.\033[0m");
-    
+    signal(SIGINT, signal_handle::signal_callback_handler);
+
     // ros::MultiThreadedSpinner spinner(4);
     // spinner.spin();
     

@@ -3,24 +3,27 @@ fusion:
   cloudTopic: "/os_cloud_node/points"
   imuTopic: "/imu/data"
   imgTopic: "/image_proc_resize/image"  
-  odomTopic: "/odometry"
+  odomTopic: "/odometry/cam"
 
   # frames
-  lidarFrame: "base_link"
-  imuFrame: "base_link"
+  lidarFrame: "fusion_base_link"
+  imuFrame: "fusion_base_link"
   odometryFrame: "odom"
-  camFrame: "cam"
+  camFrame: "fusion_cam"
   mapFrame: "map"
 
   # Extrinsic parameter between IMU and Camera.
   estimateExtrinsic: 0   # 0  Have an accurate extrinsic parameters. We will trust the following imu^R_cam, imu^T_cam, don't change it.
                           # 1  Have an initial guess about extrinsic parameters. We will optimize around your initial guess.
   combined:
-    pointFeatureDistThres: 3.0 # [m]
-    depthAssociateThres: 2.0 # [pixel]
-    depthAssociateBinNumber: 6 # number of bin threshold to associate
+    pointFeatureDistThres: 2.0 # [m]
+    projectionErrorThres: 2.0 # [pixel]
+    depthAssociateBinNumber: 5 # number of bin threshold to associate
     stackPointTime: 2.0
     lidarSkip: 2
+
+  optimization:
+    timeLag: 3.0
 
   imu:
     # IMU Settings
@@ -60,7 +63,7 @@ fusion:
     keyframeParallax: 10.0 # keyframe selection threshold (pixel)
 
     #feature traker paprameters
-    maxCnt: 150            # max feature number in feature tracking
+    maxCnt: 30            # max feature number in feature tracking
     minDist: 10            # min distance between two features 
     FThreshold: 1.0        # ransac threshold (pixel)
     showTrack: 1           # publish tracking image as topic
@@ -73,7 +76,7 @@ fusion:
 
   laser:
     # GPS Settings
-    useImuHeadingInitialization: false           # if using GPS data, set to "true"
+    useImuHeadingInitialization: true           # if using GPS data, set to "true"
     useGpsElevation: false                      # if GPS elevation is bad, set to "false"
     gpsCovThreshold: 2.0                        # m^2, threshold for using GPS data
     poseCovThreshold: 25.0                      # m^2, threshold for using GPS data
@@ -88,7 +91,7 @@ fusion:
     HORIZON_SCAN: 1024                          # lidar horizontal resolution (Velodyne:1800, Ouster:512,1024,2048)
     downsampleRate: 1                           # default: 1. Downsample your data if too many points. i.e., 16 = 64 / 4, 16 = 16 / 1
     lidarMinRange: 2.0                          # default: 1.0, minimum lidar range to be used
-    lidarMaxRange: 1000.0                       # default: 1000.0, maximum lidar range to be used
+    lidarMaxRange: 100.0                       # default: 1000.0, maximum lidar range to be used
 
     # Extrinsics (lidar -> IMU)
     transLidar2Imu: [-0.3787, 0.0, -0.6945]

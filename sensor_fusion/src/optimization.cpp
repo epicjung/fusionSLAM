@@ -18,6 +18,11 @@
 #include <gtsam/slam/ProjectionFactor.h>
 #include <gtsam/nonlinear/ISAM2.h>
 #include <gtsam_unstable/nonlinear/IncrementalFixedLagSmoother.h>
+#include "IncrementalFixedLagSmoother.h"
+#include "FixedLagSmoother.h"
+
+// launch-prefix="xterm -e gdb --args"
+
 
 using namespace std;
 using namespace gtsam;
@@ -27,18 +32,21 @@ using symbol_shorthand::P;
 
 typedef SmartProjectionPoseFactor<Cal3_S2> SmartFactor;
 
-class optimization : public ParamServer
+
+class Optimization : public ParamServer
 {
 public:
     // GTSAM
     NonlinearFactorGraph factorGraph;
     Values initialEstimate;
     ISAM2 *isam;
+    IncrementalFixedLagSmoother2 *smootherISAM2;
 
     ros::Subscriber subPoint;
     ros::Publisher  pubPoint;
     ros::Publisher  pubTestImage;
     ros::Publisher  pubPath;
+    ros::Publisher  pubInitialPath;
     ros::Publisher  pubOdomIncremental;
     int count;
 
@@ -50,7 +58,11 @@ public:
     map<int, int> numSeen;
     map<int, float> lastTime;
     map<int, bool> initialized;
-    
+    map<int, noiseModel::Gaussian::shared_ptr> marginalCovariances;
+    map<Key, double> timestamps;
+
+    std::mutex mtx;
+
     // float type
     float latestX;
     float latestY;
@@ -62,33 +74,35 @@ public:
     sensor_fusion::cloud_info cloudInfo;
     ros::Time cloudInfoTimeIn;
 
-    Eigen::Affine3f initialAffine;
+    Eigen::Affine3f affineInitial;
     Eigen::Affine3f lastAffine;
 
     pcl::PointCloud<PointTypePose>::Ptr cloudKeyPoses6D;
 
     nav_msgs::Path globalPath;
+    nav_msgs::Path initialPath;
 
-
-    optimization()
+    Optimization()
     {
         ISAM2Params parameters;
         parameters.relinearizeThreshold = 0.1;
         parameters.relinearizeSkip = 1;
         isam = new ISAM2(parameters);
 
+        smootherISAM2 = new gtsam::IncrementalFixedLagSmoother2(timeLag, parameters);
+
         // Noises (TO-DO pose noise based on the params)
         // poseNoise = noiseModel::Isotropic::Sigma(9, 0.1); // 9 d.o.f
         measNoise   = noiseModel::Isotropic::Sigma(2, 1.0);// 1px in u and v
         poseNoise   = noiseModel::Diagonal::Variances((Vector(6) << 1e-2, 1e-2, M_PI*M_PI, 1e8, 1e8, 1e8).finished()); // rad*rad, meter*meter
-        pointNoise  = noiseModel::Isotropic::Sigma(3, 2.0); // 3 d.o.f
+        pointNoise  = noiseModel::Isotropic::Sigma(3, 0.2); // 3 d.o.f
         odomNoise   = noiseModel::Diagonal::Variances((Vector(6) << 1e-6, 1e-6, 1e-6, 1e-4, 1e-4, 1e-4).finished());
 
-        
-        subPoint            = nh.subscribe<sensor_fusion::cloud_info>("lio_sam/feature/cloud_info", 1, &optimization::cloudHandler, this, ros::TransportHints().tcpNoDelay()); 
+        subPoint            = nh.subscribe<sensor_fusion::cloud_info>("fusion/deskew/cloud_info", 1, &Optimization::cloudInfoHandler, this, ros::TransportHints().tcpNoDelay()); 
         pubPoint            = nh.advertise<visualization_msgs::MarkerArray>("fusion/feature/point_landmark", 1);
         pubTestImage        = nh.advertise<sensor_msgs::Image>("fusion/feature/test_image", 1);
         pubPath             = nh.advertise<nav_msgs::Path>("fusion/mapping/path", 1);
+        pubInitialPath      = nh.advertise<nav_msgs::Path>("fusion/mapping/initial_path", 1);
         pubOdomIncremental  = nh.advertise<nav_msgs::Odometry>("fusion/mapping/odometry_incremental", 1);
         
         // initialization
@@ -109,25 +123,71 @@ public:
 
     void updateInitialGuess()
     {
-        lastAffine = pcl::getTransformation(latestX, latestY, latestZ, latestRoll, latestPitch, latestYaw);
-        initialAffine = pcl::getTransformation(cloudInfo.initialGuessX, cloudInfo.initialGuessY, cloudInfo.initialGuessZ,
-                                                cloudInfo.initialGuessRoll, cloudInfo.initialGuessPitch, cloudInfo.initialGuessYaw);
+        printf("Is cloud: %d\n", cloudInfo.isCloud);
+        affineInitial = pcl::getTransformation(latestX, latestY, latestZ, latestRoll, latestPitch, latestYaw);
+        Eigen::Affine3f affineBack = pcl::getTransformation(cloudInfo.initialGuessX, cloudInfo.initialGuessY, cloudInfo.initialGuessZ,
+                                                cloudInfo.initialGuessRoll, cloudInfo.initialGuessPitch, cloudInfo.initialGuessYaw);  
+        Eigen::Affine3f imuInitRPY = pcl::getTransformation(0.0, 0.0, 0.0, cloudInfo.imuRollInit, cloudInfo.imuPitchInit, cloudInfo.imuYawInit);
 
+        float imuRollInit = cloudInfo.imuRollInit;
+        float imuPitchInit = cloudInfo.imuPitchInit;
+        float imuYawInit = cloudInfo.imuYawInit;
+        
+        if (cloudInfo.isCloud)
+        {
+            printf("roll: %f, pitch: %f, yaw: %f\n", cloudInfo.imuRollInit, cloudInfo.imuPitchInit, cloudInfo.imuYawInit);
+            affineInitial = affineInitial * affineL2C;
+            affineBack = affineBack * affineL2C;
+            imuInitRPY = imuInitRPY * affineL2C;
+            float x, y, z;
+            pcl::getTranslationAndEulerAngles(imuInitRPY, x, y, z, imuRollInit, imuPitchInit, imuYawInit);
+        }
+
+        static Eigen::Affine3f lastImuAffine;
+        // initialization
         if (cloudKeyPoses6D->points.empty())
         {
-            latestX = 0.0;
-            latestY = 0.0;
-            latestZ = 0.0;
-            latestRoll = cloudInfo.imuRollInit;
-            latestPitch = cloudInfo.imuPitchInit;
-            latestYaw = cloudInfo.imuYawInit;
-        } else {
-            latestX = cloudInfo.initialGuessX;
-            latestY = cloudInfo.initialGuessY;
-            latestZ = cloudInfo.initialGuessZ;
-            latestRoll = cloudInfo.initialGuessRoll;
-            latestPitch = cloudInfo.initialGuessPitch;
-            latestYaw = cloudInfo.initialGuessYaw;
+            latestRoll = imuRollInit;
+            latestPitch = imuPitchInit;
+            latestYaw = imuYawInit;
+            lastImuAffine = imuInitRPY;
+            printf("Initialization\n");
+            printf("Initial: %f %f %f %f %f %f\n", latestX, latestY, latestZ, latestRoll, latestPitch, latestYaw);
+            return; 
+        }
+
+        static bool lastImuPreAffineAvailable = false;
+        static Eigen::Affine3f lastImuPreAffine;
+
+        if (cloudInfo.odomAvailable == true)
+        {
+     
+            if (!lastImuPreAffineAvailable)
+            {
+                lastImuPreAffine = affineBack;
+                lastImuPreAffineAvailable = true;
+            } else {
+                Eigen::Affine3f transIncre = lastImuPreAffine.inverse() * affineBack;
+                Eigen::Affine3f transTobe = pcl::getTransformation(latestX, latestY, latestZ, latestRoll, latestPitch, latestYaw);
+                Eigen::Affine3f transFinal = transTobe * transIncre;
+                pcl::getTranslationAndEulerAngles(transFinal, latestX, latestY, latestZ, latestRoll, latestPitch, latestYaw);
+                printf("Odom Initial: %f %f %f %f %f %f\n", latestX, latestY, latestZ, latestRoll, latestPitch, latestYaw);
+                lastImuPreAffine = affineBack;
+                lastImuAffine = imuInitRPY;
+                return;
+            }
+        }
+
+        if (cloudInfo.imuAvailable == true)
+        {
+            Eigen::Affine3f transIncre = lastImuAffine.inverse() * imuInitRPY;
+            printf("cloudinfo init: x: %f, y: %f, z: %f\n", imuRollInit, imuPitchInit, imuYawInit);
+            Eigen::Affine3f transTobe = pcl::getTransformation(latestX, latestY, latestZ, latestRoll, latestPitch, latestYaw);
+            Eigen::Affine3f transFinal = transTobe * transIncre;
+            pcl::getTranslationAndEulerAngles(transFinal, latestX, latestY, latestZ, latestRoll, latestPitch, latestYaw);
+            printf("IMU Initial: %f %f %f %f %f %f\n", latestX, latestY, latestZ, latestRoll, latestPitch, latestYaw);
+            lastImuAffine = imuInitRPY;
+            return;
         }
     }
 
@@ -138,6 +198,7 @@ public:
         if (cloudKeyPoses6D->points.empty())
         {
             factorGraph.add(PriorFactor<Pose3>(Symbol('x', 0), poseTo, poseNoise));
+            timestamps[Symbol('x', 0)] = cloudInfoTimeIn.toSec();
             initialEstimate.insert(Symbol('x', 0), poseTo);
         } else {
             Pose3 poseFrom = pclPoint2gtsamPose(cloudKeyPoses6D->points.back());
@@ -146,6 +207,7 @@ public:
             factorGraph.add(BetweenFactor<Pose3>(Symbol('x', keyFrom), Symbol('x', keyTo), 
                                                 poseFrom.between(poseTo), odomNoise));
             initialEstimate.insert(Symbol('x', keyTo), poseTo);
+            timestamps[Symbol('x', keyTo)] = cloudInfoTimeIn.toSec();
         }
     }
 
@@ -168,100 +230,111 @@ public:
         cv_ptr->header.frame_id = "image";
         cv_ptr->image = testImg;
 
-        Pose3 camPose = float2gtsamPose(latestX, latestY, latestZ, latestRoll, latestPitch, latestYaw);
-  
+        Eigen::Affine3f affineNow = pcl::getTransformation(latestX, latestY, latestZ, latestRoll, latestPitch, latestYaw);
+
         Cal3_S2::shared_ptr K(new Cal3_S2(230.39028930664062, 230.31454467773438, 0.0, 239.93666076660156, 136.52784729003906));
 
         for (size_t i = 0; i < cloudInfo.point_feature.points.size(); ++i)
         {
-            Point2 measurement = Point2(double(cloudInfo.point_feature.points[i].x), 
-                                        double(cloudInfo.point_feature.points[i].y));
-            bool associated = !isinf(cloudInfo.point_feature.channels[1].values[i]);
+            Point2 measurement = Point2(double(cloudInfo.point_feature.channels[4].values[i]), 
+                                        double(cloudInfo.point_feature.channels[5].values[i]));
             
+            // TO-DO: modify the method to check association
+            bool associated = !(cloudInfo.point_feature.channels[1].values[i] == 0.0
+                                && cloudInfo.point_feature.channels[2].values[i] == 0.0
+                                && cloudInfo.point_feature.channels[3].values[i] == 0.0);
+            
+            int id = int(cloudInfo.point_feature.channels[0].values[i]);
+
+            if (numSeen.find(id) == numSeen.end())
+                numSeen[id] = 1;
+            else
+                numSeen[id]++;
+
             if (associated)
             {
-                int id = int(cloudInfo.point_feature.channels[0].values[i]);
-                // First point feature
-                if (count == 0)
+                if (numSeen[id] >= 2)
                 {
-                    // initialEstimate.insert(Symbol('l', id), point);
-                    numSeen[id] = 1;
-                }
-                else
-                {
-                    if (numSeen.find(id) == numSeen.end()) // new feature
-                    {
-                        numSeen[id] = 1;
-                    }
-                    else // already exists
-                    {
-                        numSeen[id] += 1;
+                    printf("id %d Num seen: %d\n", id, numSeen[id]);
+                    lastTime[id] = cloudInfoTimeIn.toSec();
 
-                        if (numSeen[id] >= 5)
+                    // convert point to world frame
+                    float localX = cloudInfo.point_feature.channels[1].values[i];
+                    float localY = cloudInfo.point_feature.channels[2].values[i];
+                    float localZ = cloudInfo.point_feature.channels[3].values[i];
+                    float worldX = affineNow(0,0)*localX+affineNow(0,1)*localY+affineNow(0,2)*localZ+affineNow(0,3);
+                    float worldY = affineNow(1,0)*localX+affineNow(1,1)*localY+affineNow(1,2)*localZ+affineNow(1,3);
+                    float worldZ = affineNow(2,0)*localX+affineNow(2,1)*localY+affineNow(2,2)*localZ+affineNow(2,3);
+                    Point3 worldPoint = Point3(worldX, worldY, worldZ);
+
+                    // project point for checking
+                    Pose3 camPose = float2gtsamPose(latestX, latestY, latestZ, latestRoll, latestPitch, latestYaw);
+                    PinholeCamera<Cal3_S2> camera(camPose, *K);
+                    Point2 estimation = camera.project(worldPoint);
+
+                    // add projection factor 
+                    float reprojError = sqrt((measurement.x()-estimation.x())*(measurement.x()-estimation.x()) +
+                                                (measurement.y()-estimation.y())*(measurement.y()-estimation.y()));
+
+                    if (reprojError < projectionErrorThres)
+                    {
+                        factorGraph.emplace_shared<GenericProjectionFactor<Pose3, Point3, Cal3_S2>>(
+                            measurement, measNoise, Symbol('x', cloudKeyPoses6D->size()), Symbol('l', id), K);
+                        timestamps[Symbol('l', id)] = cloudInfoTimeIn.toSec();
+
+                        // visualization (off for operation)
+                        visualization_msgs::Marker marker;
+                        marker.action = 0;
+                        marker.type = 2; // sphere
+                        marker.ns = "points";
+                        marker.id = id;
+                        marker.pose.position.x = worldPoint.x();
+                        marker.pose.position.y = worldPoint.y();
+                        marker.pose.position.z = worldPoint.z();
+                        marker.header.frame_id = mapFrame;
+                        marker.scale.x = 0.2;
+                        marker.scale.y = 0.2;
+                        marker.scale.z = 0.2;
+                        marker.color.r = 0.5451;
+                        marker.color.g = 0.0;
+                        marker.color.b = 1.0;
+                        marker.color.a = 1.0;
+                        pointLandmark.markers.push_back(marker);
+
+                        if (!initialized[id])
                         {
-                            printf("id %d Num seen: %d\n", id, numSeen[id]);
-                            lastTime[id] = cloudInfoTimeIn.toSec();
-
-                            // convert point to world frame
-                            float localX = cloudInfo.point_feature.channels[1].values[i];
-                            float localY = cloudInfo.point_feature.channels[2].values[i];
-                            float localZ = cloudInfo.point_feature.channels[3].values[i];
-
-                            // if (sqrt(localX*localX + localY*localY + localZ*localZ) < pointFeatureDistThres)
-                            // {
-                                float worldX = initialAffine(0,0)*localX+initialAffine(0,1)*localY+initialAffine(0,2)*localZ+initialAffine(0,3);
-                                float worldY = initialAffine(1,0)*localX+initialAffine(1,1)*localY+initialAffine(1,2)*localZ+initialAffine(1,3);
-                                float worldZ = initialAffine(2,0)*localX+initialAffine(2,1)*localY+initialAffine(2,2)*localZ+initialAffine(2,3);
-                                Point3 worldPoint = Point3(worldX, worldY, worldZ);
-
-                                // project point for checking
-                                PinholeCamera<Cal3_S2> camera(camPose, *K);
-                                Point2 estimation = camera.project(worldPoint);
-
-                                // visualization (test image for projection)
-                                cv::line(cv_ptr->image, cv::Point(measurement.x(), measurement.y()), cv::Point(estimation.x(), estimation.y()), Scalar(255, 0, 0), 1, LINE_8);
-                            
-                                cv::putText(cv_ptr->image, to_string(id), Point(measurement.x(), measurement.y()), 
-                                            cv::FONT_HERSHEY_COMPLEX_SMALL, 0.5, cv::Scalar(0, 255, 0), 0.5, cv::LINE_AA);
-
-                                // visualization (off for operation)
-                                visualization_msgs::Marker marker;
-                                marker.action = 0;
-                                marker.type = 2; // sphere
-                                marker.ns = "points";
-                                marker.id = id;
-                                marker.pose.position.x = worldPoint.x();
-                                marker.pose.position.y = worldPoint.y();
-                                marker.pose.position.z = worldPoint.z();
-                                marker.header.frame_id = mapFrame;
-                                marker.scale.x = 0.2;
-                                marker.scale.y = 0.2;
-                                marker.scale.z = 0.2;
-                                marker.color.r = 0.5451;
-                                marker.color.g = 0.0;
-                                marker.color.b = 1.0;
-                                marker.color.a = 1.0;
-                                pointLandmark.markers.push_back(marker);
-
-                                // add projection factor 
-                                factorGraph.emplace_shared<GenericProjectionFactor<Pose3, Point3, Cal3_S2>>(
-                                    measurement, measNoise, Symbol('x', cloudKeyPoses6D->size()-1), Symbol('l', id), K);
-
-                                if (!initialized[id])
-                                {
-                                    initialized[id] = true;
-                                    initialEstimate.insert(Symbol('l', id), worldPoint);
-                                    factorGraph.add(PriorFactor<Point3>(Symbol('l', id), worldPoint, pointNoise));
-                                }
-                                numPoint++;
-                            // }
+                            initialized[id] = true;
+                            initialEstimate.insert(Symbol('l', id), worldPoint);
+                            if (marginalCovariances.find(id) == marginalCovariances.end()) // first initialized
+                                factorGraph.add(PriorFactor<Point3>(Symbol('l', id), worldPoint, pointNoise));
+                            else // marginalized before
+                                factorGraph.add(PriorFactor<Point3>(Symbol('l', id), worldPoint, marginalCovariances[id]));
                         }
+                        cv::putText(cv_ptr->image, to_string(id), Point(measurement.x(), measurement.y()), 
+                                    cv::FONT_HERSHEY_COMPLEX_SMALL, 0.5, cv::Scalar(0, 255, 0), 0.5, cv::LINE_AA);
                     }
+                    else
+                    {
+                        cv::putText(cv_ptr->image, to_string(id), Point(measurement.x(), measurement.y()), 
+                                    cv::FONT_HERSHEY_COMPLEX_SMALL, 0.5, cv::Scalar(0, 0, 255), 0.5, cv::LINE_AA);
+                    }
+                    
+                    // visualization (test image for projection)
+                    cv::line(cv_ptr->image, cv::Point(measurement.x(), measurement.y()), cv::Point(estimation.x(), estimation.y()), Scalar(255, 0, 0), 1, LINE_8);
+
+                    numPoint++;
+                }
+            
+            }
+            else
+            {
+                if (numSeen[id] >= 5)
+                {
+
                 }
             }
         }
 
-        // Smart Factor
 
         printf("# of points: %d\n", numPoint);
         pubPoint.publish(pointLandmark);
@@ -270,7 +343,7 @@ public:
         ROS_WARN("Add point factor time: %fms\n", tictoc.toc());
     }
 
-    void updatePath(const PointTypePose& pose_in)
+    void updatePath(const PointTypePose& pose_in, nav_msgs::Path& path)
     {
         geometry_msgs::PoseStamped pose_stamped;
         pose_stamped.header.stamp = ros::Time().fromSec(pose_in.time);
@@ -288,20 +361,25 @@ public:
         // geometry_msgs::PoseStamped gps_posestamped;
         // transformPose(pose_stamped, gps_posestamped);
         // gpsGlobalPath.poses.push_back(gps_posestamped);
-        globalPath.poses.push_back(pose_stamped);
+        path.poses.push_back(pose_stamped);
     }
 
     void publishOdometry()
     {
         nav_msgs::Odometry odomIncre;
+        Eigen::Affine3f affineFinal = pcl::getTransformation(latestX, latestY, latestZ, latestRoll, latestPitch, latestYaw);
+        affineFinal = affineFinal * affineL2C.inverse();
+        float x, y, z, roll, pitch, yaw;
+        pcl::getTranslationAndEulerAngles(affineFinal, x, y, z, roll, pitch, yaw);
         odomIncre.header.stamp = cloudInfoTimeIn;
         odomIncre.header.frame_id = odometryFrame;
         odomIncre.child_frame_id = "odom_mapping";
-        odomIncre.pose.pose.position.x = latestX;
-        odomIncre.pose.pose.position.y = latestY;
-        odomIncre.pose.pose.position.z = latestZ;
-        odomIncre.pose.pose.orientation = tf::createQuaternionMsgFromRollPitchYaw(latestRoll, latestPitch, latestYaw);
+        odomIncre.pose.pose.position.x = x;
+        odomIncre.pose.pose.position.y = y;
+        odomIncre.pose.pose.position.z = z;
+        odomIncre.pose.pose.orientation = tf::createQuaternionMsgFromRollPitchYaw(roll, pitch, yaw);
         pubOdomIncremental.publish(odomIncre);
+        ROS_WARN("optimization.cpp: publish odometry incremental");
         // TO-DO: consider loop closing and publish relative pose
     }  
 
@@ -315,7 +393,7 @@ public:
         tf::Transform map2Cam = tf::Transform(tf::createQuaternionFromRPY(latestRoll, latestPitch, latestYaw), 
                                               tf::Vector3(latestX, latestY, latestZ));
         tfMap2Cam.sendTransform(tf::StampedTransform(map2Cam, cloudInfoTimeIn, mapFrame, camFrame));
-
+        ROS_WARN("publish frames");
         // publish global path
         if (pubPath.getNumSubscribers() != 0)
         {
@@ -323,21 +401,52 @@ public:
             globalPath.header.frame_id = mapFrame;
             pubPath.publish(globalPath);
         }
+
+        // temp
+        if (pubInitialPath.getNumSubscribers() != 0)
+        {
+            initialPath.header.stamp = cloudInfoTimeIn;
+            initialPath.header.frame_id = mapFrame;
+            pubInitialPath.publish(initialPath);
+        }
+
     }
 
-    void cloudHandler(const sensor_fusion::cloud_info cloudInfoMsg)
+    void slideWindow()
+    {
+        if (cloudKeyPoses6D->size() == WINDOW_SIZE)
+        {
+            int indexToRemove = cloudKeyPoses6D->size() - WINDOW_SIZE;
+            factorGraph.remove(indexToRemove);
+
+        }
+    }
+
+    void cloudInfoHandler(const sensor_fusion::cloud_info cloudInfoMsg)
     {
         ROS_WARN("Cloud Handler");
         
         cloudInfo = cloudInfoMsg;
         cloudInfoTimeIn = cloudInfo.header.stamp;
 
+        lock_guard<mutex> lock(mtx);
+
         Cal3_S2::shared_ptr K(new Cal3_S2(230.39028930664062, 230.31454467773438, 0.0, 239.93666076660156, 136.52784729003906));
 
-        // Fix the first id?
-        printf("Count: %d\n", count);
-
         updateInitialGuess();
+
+        optimize();
+
+        publishOdometry();
+
+        publishFrames();
+
+        ROS_WARN("Keyframe count: %d\n", count);
+    }
+
+    void optimize()
+    {
+        TicToc tictoc;
 
         if (saveFrame() == false)
             return;
@@ -346,32 +455,35 @@ public:
         
         addPointFactor();
 
-        optimize();
-
-        publishOdometry();
-
-        publishFrames();
-
-        count++;
-    }
-
-    void optimize()
-    {
-        TicToc tictoc;
-
         // optimize and get results
-        initialEstimate.print("Initial results:\n");
-        isam->update(factorGraph, initialEstimate);
-        isam->update();
+        // initialEstimate.print("Initial results:\n");
+        // isam->update(factorGraph, initialEstimate);
+        // isam->update();
+        // printf("isam update\n");
 
+
+        cout << "  iSAM2 Smoother Keys: " << endl;
+        for(const FixedLagSmoother2::KeyTimestampMap::value_type& key_timestamp: smootherISAM2->timestamps()) {
+            cout << setprecision(5) << "    Key: " << DefaultKeyFormatter(key_timestamp.first) << "  Time: " << key_timestamp.second << endl;
+        }
+
+        IncrementalFixedLagSmoother2::Result result = smootherISAM2->update(factorGraph, initialEstimate, timestamps);
+        smootherISAM2->update();
+        updateKeyframeMap(result);
+
+        printf("smoother update\n");
         // resize and reset 
         factorGraph.resize(0);
         initialEstimate.clear();
+        timestamps.clear();
 
-        Values currentEstimate = isam->calculateEstimate();
-        currentEstimate.print("Final results:\n");
+        // Values currentEstimate = isam->calculateEstimate();
+        // currentEstimate.print("Final results:\n");
+        // Pose3 latestEstimate = currentEstimate.at<Pose3>(Symbol('x', cloudKeyPoses6D->size()));
+        Values currentEstimate = smootherISAM2->calculateEstimate();
+        currentEstimate.print("Final results2: \n");
         Pose3 latestEstimate = currentEstimate.at<Pose3>(Symbol('x', cloudKeyPoses6D->size()));
-        
+
         ROS_WARN("Optimization time: %fms\n", tictoc.toc());
 
         // save the latest
@@ -391,7 +503,43 @@ public:
         thisPose6D.yaw = latestYaw;
         thisPose6D.time = cloudInfoTimeIn.toSec();
         cloudKeyPoses6D->push_back(thisPose6D);
-        updatePath(thisPose6D);
+        updatePath(thisPose6D, globalPath);
+        
+        // temp
+        PointTypePose tempPose;
+        tempPose.x = cloudInfo.initialGuessX;
+        tempPose.y = cloudInfo.initialGuessY;
+        tempPose.z = cloudInfo.initialGuessZ;
+        tempPose.roll = cloudInfo.initialGuessRoll;
+        tempPose.pitch = cloudInfo.initialGuessPitch;
+        tempPose.yaw = cloudInfo.initialGuessYaw;
+        tempPose.time = cloudInfoTimeIn.toSec();
+        updatePath(tempPose, initialPath);
+
+        count++;
+
+    }
+
+    void updateKeyframeMap(IncrementalFixedLagSmoother2::Result result)
+    {
+        printf("Update keyframe map\n");
+        for(auto const &data : result.marginalCovariances) 
+        {
+            string keyString = DefaultKeyFormatter(data.first);
+            auto npos = keyString.find('l');
+            if (npos != string::npos) // found landmark
+            {
+                int id = stoi(keyString.substr(npos+1));
+                initialized[id] = false;
+                marginalCovariances[id] = result.marginalCovariances[data.first];
+                printf("Point %s marginalized\n", keyString.c_str());
+            }
+            else if (keyString.find('x') != string::npos) // found odometry pose
+            {
+                count--;
+                printf("Odom %s marginalized\n", keyString.c_str());
+            }
+        }
     }
 
     bool saveFrame()
@@ -400,7 +548,7 @@ public:
             return true;
 
         Eigen::Affine3f transStart = pclPoint2Affine3f(cloudKeyPoses6D->back());
-        Eigen::Affine3f transFinal = initialAffine;
+        Eigen::Affine3f transFinal = pcl::getTransformation(latestX, latestY, latestZ, latestRoll, latestPitch, latestYaw);
         Eigen::Affine3f transBetween = transStart.inverse() * transFinal;
         float x, y, z, roll, pitch, yaw;
         pcl::getTranslationAndEulerAngles(transBetween, x, y, z, roll, pitch, yaw);
@@ -411,7 +559,7 @@ public:
             sqrt(x*x + y*y + z*z) < surroundingkeyframeAddingDistThreshold)
             return false;
 
-        printf("Save frame -- roll: %f, pitch: %f, yaw: %f, dist: %f\n", roll, pitch, yaw, sqrt(x*x+y*y+z*z));
+        ROS_WARN("Save frame -- roll: %f, pitch: %f, yaw: %f, dist: %f\n", roll, pitch, yaw, sqrt(x*x+y*y+z*z));
         return true;
     }
 
@@ -438,11 +586,12 @@ public:
 int main(int argc, char** argv)
 {
     ros::init(argc, argv, "sensor_fusion");
-    optimization opt;
+    Optimization opt;
 
     ROS_INFO("\033[1;32m---->Optimization Started.\033[0m");
 
     // std::thread optimizationThread(&optimization::initCallback, &opt);
+    signal(SIGINT, signal_handle::signal_callback_handler);
 
     ros::MultiThreadedSpinner spinner(2);
     spinner.spin();

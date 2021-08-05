@@ -1,8 +1,8 @@
-cmake_minimum_required(VERSION 2.8.3)
+cmake_minimum_required(VERSION 3.0)
 project(sensor_fusion)
 
 set(CMAKE_BUILD_TYPE "Release")
-set(CMAKE_CXX_FLAGS "-std=c++11")
+set(CMAKE_CXX_FLAGS "-std=c++17")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -Wall -g -pthread")
 
 find_package(catkin REQUIRED COMPONENTS
@@ -27,7 +27,8 @@ find_package(catkin REQUIRED COMPONENTS
 find_package(OpenMP REQUIRED)
 find_package(PCL REQUIRED QUIET)
 find_package(OpenCV REQUIRED QUIET)
-find_package(GTSAM REQUIRED QUIET)
+find_package(GTSAM REQUIRED)
+# find_package(Boost REQUIRED COMPONENTS timer)
 
 add_message_files(
   DIRECTORY msg
@@ -112,5 +113,14 @@ target_link_libraries(${PROJECT_NAME}_visualFeature ${catkin_LIBRARIES} ${OpenCV
 add_executable(${PROJECT_NAME}_optimization src/optimization.cpp)
 add_dependencies(${PROJECT_NAME}_optimization ${catkin_EXPORTED_TARGETS} ${PROJECT_NAME}_generate_messages_cpp)
 target_compile_options(${PROJECT_NAME}_optimization PRIVATE ${OpenMP_CXX_FLAGS})
-target_link_libraries(${PROJECT_NAME}_optimization ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} ${OpenMP_CXX_FLAGS} gtsam)
+target_link_libraries(${PROJECT_NAME}_optimization ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} ${OpenMP_CXX_FLAGS} ${CHOLMOD_LIBRARIES} gtsam)
 
+# Feature manager
+add_executable(${PROJECT_NAME}_featureManager src/featureManager.cpp)
+add_dependencies(${PROJECT_NAME}_featureManager ${catkin_EXPORTED_TARGETS} ${PROJECT_NAME}_generate_messages_cpp)
+target_link_libraries(${PROJECT_NAME}_featureManager ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBRARIES})
+
+
+# test
+add_executable(example src/main.cpp)
+target_link_libraries(example PRIVATE gtsam)
