@@ -54,6 +54,12 @@ class FeaturePerFrame
 class FeaturePerId
 {
     public:
+
+        FeaturePerId(int _id, int _startFrame, double _startTime) :
+            featureId(_id), startFrame(_startFrame), startTime(_startTime),
+            usedNum(0), solveFlag(0), isDepth(0)
+        {
+        }
         const int featureId;
         double startTime;
         int startFrame;
@@ -61,13 +67,8 @@ class FeaturePerId
         int usedNum;
         int solveFlag;
         bool isDepth;
-        FeaturePerId(int _id, int _startFrame, double _startTime) :
-            featureId(_id), startFrame(_startFrame), startTime(_startTime),
-            usedNum(0), solveFlag(0), isDepth(0)
-        {
-        }
     
-    int endFrame();
+        int endFrame();
 };
 
 class FeatureManager : public ParamServer

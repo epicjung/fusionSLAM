@@ -91,9 +91,6 @@ void FeatureManager::inputPointFeature(const sensor_msgs::PointCloud pointIn)
     ROS_WARN("Manage point time: %fms\n", tictoc.toc());
     pointInfo.header = pointIn.header;
     pointInfo.point_feature = pointFeature;
-    featLock.lock();
-    tempQueue.push_back(pointInfo);
-    featLock.unlock();
 }
     
 void FeatureManager::inputCloudInfo(const sensor_fusion::cloud_info cloudInfoIn)
@@ -129,8 +126,6 @@ void FeatureManager::inputImage(const sensor_msgs::Image imgIn)
 
 void FeatureManager::removeOldFeatures(double refTime)
 {
-    lock_guard<mutex> lock(pointLock);
-
     for (auto it = pointFeaturesPerId.begin(), it_next = pointFeaturesPerId.begin(); it != pointFeaturesPerId.end(); it = it_next)
     {
         it_next++;
@@ -139,7 +134,9 @@ void FeatureManager::removeOldFeatures(double refTime)
 
         if (it->featurePerFrame.at(lastIdx).timestamp < refTime)
         {
+            pointLock.lock();
             pointFeaturesPerId.erase(it);
+            pointLock.unlock();
         }
     }
 
@@ -148,7 +145,9 @@ void FeatureManager::removeOldFeatures(double refTime)
         FeaturePerFrame fpf = pointQueue.front().second;
         if (fpf.timestamp < refTime)
         {
+            pointLock.lock();
             pointQueue.pop_front();
+            pointLock.unlock();
         }
     }
 }
@@ -286,41 +285,6 @@ float FeatureManager::compensatedParallax2(const FeaturePerId &it)
     return ans;
 }
 
-void FeatureManager::processFeature()
-{
-    while(1)
-    {
-        if (!featureQueue.empty())
-        {
-            sensor_fusion::cloud_info thisFeature = tempQueue.front();
-
-            double currentTime = ROS_TIME(&thisFeature);
-
-            if (currentTime < timeSent)
-            {
-                featLock.lock();
-                tempQueue.pop_front();
-                featLock.unlock();
-                continue;
-            } 
-
-            // TO-DO: what if timeSent does not change because pointcloud stops coming in?
-            if (currentTime >= timeSent && currentTime < timeSent + 0.08)
-            {
-                featLock.lock();
-                tempQueue.pop_front();
-                featureQueue.push_back(thisFeature);
-                featLock.unlock();
-                printf("Timesent: %f; image time: %f \n", timeSent, currentTime);
-            }
-
-
-        }
-
-        std::chrono::milliseconds dura(2);
-        std::this_thread::sleep_for(dura);
-    }
-}
 
 void FeatureManager::updateImuRPY()
 {
@@ -477,6 +441,8 @@ void FeatureManager::associatePointFeature()
         return;
     }
 
+    printf("laserCloudNearby: %d\n", laserCloudNearby->size());
+
     // 1. Transform pointcloud to camera frame
     pcl::PointCloud<PointType>::Ptr localCloud(new pcl::PointCloud<PointType>());
     PointTypePose transformPose = trans2PointTypePose(transWorld2Cam.inverse());
@@ -491,11 +457,15 @@ void FeatureManager::associatePointFeature()
     float angRes = 180.0 / float(numBins); // cover only -90~90 FOV of the lidar 
     cv::Mat rangeImage = cv::Mat(numBins, numBins, CV_32F, cv::Scalar::all(FLT_MAX));
 
+    printf("2. Project depth cloud on the range image and filter points in the same region\n");
+    int temp = 0;
+
     for (int i = 0; i < (int)localCloud->size(); ++i)
     {
         PointType p = localCloud->points[i];
         if (p.z > 0.0 && abs(p.y / p.z) < 10.0 && abs(p.x / p.z) < 10.0)
         {
+            temp++;
             // Horizontal: 0 [deg] (x > 0) ~ 180 [deg] (x < 0) w.r.t x-axis
             float horizonAngle = atan2(p.z, p.x) * 180.0 / M_PI; 
             int colIdx = round(horizonAngle / angRes);
@@ -515,6 +485,10 @@ void FeatureManager::associatePointFeature()
             }
         }
     }
+    printf("Included %d\n", temp);
+
+    printf("3. localCloud size: %d\n", (int)localCloud->size());
+
 
     // 3. Extract cloud from the range image
     pcl::PointCloud<PointType>::Ptr localCloudFiltered(new pcl::PointCloud<PointType>());
@@ -526,6 +500,8 @@ void FeatureManager::associatePointFeature()
                 localCloudFiltered->push_back(pointArray[i][j]);
         }
     }
+
+    printf("3. localCloudFiltered size: %d\n", (int)localCloudFiltered->size());
 
     // 4. Project pointcloud onto a unit sphere
     pcl::PointCloud<PointType>::Ptr localCloudSphere(new pcl::PointCloud<PointType>());
@@ -539,43 +515,47 @@ void FeatureManager::associatePointFeature()
         p.intensity = range;
         localCloudSphere->push_back(p);
     }
+    printf("4. Project pointcloud onto a unit sphere\n");
 
     // TO-DO: cloudInfo LiDAR로 변경 필요
     if (localCloudSphere->size() < 10) 
         return;
 
+    printf("localCloudSphere->size() < 10\n");
+
     // No need
     cv_bridge::CvImagePtr cv_ptr;
-    bool isFound = false;
+
+    while (!imgQueue.empty())
     {
-        lock_guard<mutex> lock4(imgLock);
-        
-        while (!imgQueue.empty())
+        if (imgQueue.front().first < timeImageCur)
         {
-            if (imgQueue.front().first < timeImageCur)
-            {
-                imgQueue.pop_front();
-            }
-            else if (imgQueue.front().first == timeImageCur)
-            {
-                // cv::Mat grayImage = imgQueue.front().second;
-                // cvtColor(grayImage, thisImage, CV_GRAY2RGB);
-                sensor_msgs::Image thisImage = imgQueue.front().second;
-                cv_ptr = cv_bridge::toCvCopy(thisImage, sensor_msgs::image_encodings::BGRA8);
-                imgQueue.pop_front();
-                isFound = true;
-                printf("Found the image\n");
-                break;
-            }
+            imgQueue.pop_front();
+            printf("Old images\n");
+        }
+        else if (imgQueue.front().first == timeImageCur)
+        {
+            // cv::Mat grayImage = imgQueue.front().second;
+            // cvtColor(grayImage, thisImage, CV_GRAY2RGB);
+            sensor_msgs::Image thisImage = imgQueue.front().second;
+            cv_ptr = cv_bridge::toCvCopy(thisImage, sensor_msgs::image_encodings::BGRA8);
+            imgQueue.pop_front();
+            printf("Found the image\n");
+            break;
         }
     }
+    
+    printf("Noneed \n");
 
     // 5. Project 2D point feature to unit sphere
     pcl::PointCloud<PointType>::Ptr pointSphere(new pcl::PointCloud<PointType>());
-    std::vector<FeaturePerId*> iterCandidate;        
+    std::vector<FeaturePerId*> iterCandidate; 
+    printf("point feature counter: %d\n", (int)pointFeaturesPerId.size());      
     for (auto &it : pointFeaturesPerId)
     {            
         int lastIndex = it.startFrame + it.featurePerFrame.size() - 1;
+        printf("id: %d, lastIndex: %d, key: %d\n", it.featureId, lastIndex, keyframeCount);
+
         if ((int) it.featurePerFrame.size() >= 2 && lastIndex == keyframeCount)
         {            
             Eigen::Vector3f thisFeature = it.featurePerFrame.back().point;
@@ -692,11 +672,10 @@ void FeatureManager::associatePointFeature()
                 //         iterCandidate[i]->estimatedXYZ.z(),
                 //         iterCandidate[i]->featurePerFrame.back().uv.x(), 
                 //         iterCandidate[i]->featurePerFrame.back().uv.y());
-                if (isFound)
-                {
-                    cv::Point2f uv(iterCandidate[i]->featurePerFrame.back().uv.x(), iterCandidate[i]->featurePerFrame.back().uv.y());
-                    cv::circle(cv_ptr->image, uv, 3, cv::Scalar(0, 255, 0), -1);
-                }
+
+                cv::Point2f uv(iterCandidate[i]->featurePerFrame.back().uv.x(), iterCandidate[i]->featurePerFrame.back().uv.y());
+                cv::circle(cv_ptr->image, uv, 3, cv::Scalar(0, 255, 0), -1);
+            
                 count++;
                 // pointFeature.channels[1].values[i] = pointSphere->points[i].x;
                 // pointFeature.channels[2].values[i] = pointSphere->points[i].y;

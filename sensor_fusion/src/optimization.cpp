@@ -635,6 +635,7 @@ public:
                 featLock.lock();
                 fManager.featureQueue.pop_front();
                 featLock.unlock();
+                printf("cloudInfoTimeIn: %f, Last: %f\n", cloudInfoTimeIn.toSec(), timeLastIn);
 
                 if (cloudInfoTimeIn.toSec() > timeLastIn)
                 {
@@ -647,11 +648,11 @@ public:
 
                     timeLastIn = cloudInfoTimeIn.toSec();
 
-                    static double timeLastProcessing = -1;
+                    // static double timeLastProcessing = -1;
 
-                    if (cloudInfoTimeIn.toSec() - timeLastProcessing >= mappingProcessInterval)
-                    {
-                        timeLastProcessing = cloudInfoTimeIn.toSec();
+                    // if (cloudInfoTimeIn.toSec() - timeLastProcessing >= mappingProcessInterval)
+                    // {
+                        // timeLastProcessing = cloudInfoTimeIn.toSec();
                         
                         updateInitialGuess();
 
@@ -668,7 +669,7 @@ public:
                         publishFrames();
 
                         ROS_WARN("Keyframe count: %d\n", count);
-                    }
+                    // }
                 }
             } 
             else 
@@ -1427,7 +1428,7 @@ int main(int argc, char** argv)
 
     signal(SIGINT, signal_handle::signal_callback_handler);
 
-    ros::MultiThreadedSpinner spinner(2);
+    ros::MultiThreadedSpinner spinner(4);
     spinner.spin();
 
     optimizationThread.join();
