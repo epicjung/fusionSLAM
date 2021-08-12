@@ -111,10 +111,11 @@ target_link_libraries(${PROJECT_NAME}_visualFeature ${catkin_LIBRARIES} ${OpenCV
 
 # optimization
 add_library(lib src/featureManager.cpp)
+target_link_libraries(lib ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBRARIES})
 add_executable(${PROJECT_NAME}_optimization src/optimization.cpp)
 add_dependencies(${PROJECT_NAME}_optimization ${catkin_EXPORTED_TARGETS} ${PROJECT_NAME}_generate_messages_cpp)
 target_compile_options(${PROJECT_NAME}_optimization PRIVATE ${OpenMP_CXX_FLAGS})
-target_link_libraries(${PROJECT_NAME}_optimization ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} ${OpenMP_CXX_FLAGS} ${CHOLMOD_LIBRARIES} gtsam lib)
+target_link_libraries(${PROJECT_NAME}_optimization ${OpenMP_CXX_FLAGS} ${CHOLMOD_LIBRARIES} gtsam lib)
 
 # # Feature manager
 # add_executable(${PROJECT_NAME}_featureManager src/featureManager.cpp)
