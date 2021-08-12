@@ -98,7 +98,7 @@ public:
         pubExtractedCloud = nh.advertise<sensor_msgs::PointCloud2> ("fusion/deskew/cloud_deskewed", 1);
         pubExtractedCloudCam = nh.advertise<sensor_msgs::PointCloud2>("fusion/deskew/cam_deskewed", 1);
         pubProjectedImage = nh.advertise<sensor_msgs::Image>("projected_img", 1);
-        pubLaserCloudInfo = nh.advertise<sensor_fusion::cloud_info> ("fusion/deskew/cloud_info", 1);
+        pubLaserCloudInfo = nh.advertise<sensor_fusion::cloud_info> ("/fusion/deskew/cloud_info", 1);
 
         allocateMemory();
         resetParameters();
@@ -196,29 +196,26 @@ public:
     void uvHandler(const sensor_msgs::PointCloudConstPtr &msg)
     {
         lock_guard<mutex> lock3(uvLock);
-        printf("incoming uv time past: %f\n", msg->header.stamp.toSec());
         uvQueue.push_back(*msg);
     }
        
 
     void cloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
     {
-        cloudInfo.isCloud = true; // default
-
         if (!cachePointCloud(laserCloudMsg))
         {
             return;
         }
 
-        if (!getFirstImage(timeScanCur, timeScanEnd))
-        { 
-            printf ("\033[31;1m Image Not Available \033[0m\n");
-        }
-        else
-        {
-            printf ("\033[32;1m Image Available \033[0m\n");
-            printf("imgDeskewTime: %f\n", imgDeskewTime);
-        }
+        // if (!getFirstImage(timeScanCur, timeScanEnd))
+        // { 
+        //     printf ("\033[31;1m Image Not Available \033[0m\n");
+        // }
+        // else
+        // {
+        //     printf ("\033[32;1m Image Available \033[0m\n");
+        //     printf("imgDeskewTime: %f\n", imgDeskewTime);
+        // }
 
         if (!deskewInfo())
         {
@@ -230,10 +227,10 @@ public:
 
         cloudExtraction();
 
-        stackPointCloud();
+        // stackPointCloud();
 
-        if (imgDeskewFlag)
-            associatePointFeature();
+        // if (imgDeskewFlag)
+        //     associatePointFeature();
 
         publishClouds();
 
@@ -242,78 +239,78 @@ public:
         resetParameters();
     }
 
-    void stackPointCloud()
-    {
-        TicToc tictoc;
+    // void stackPointCloud()
+    // {
+    //     TicToc tictoc;
 
-        lock_guard<mutex> lock(lidarLock);
+    //     lock_guard<mutex> lock(lidarLock);
 
-        static int lidarCount = -1;
-        // TO-DO: this should modified to stack the pointcloud even if there is no image to deskew
-        if (cloudInfo.isCloud || ++lidarCount % (lidarSkip+1) != 0) 
-            return;
+    //     static int lidarCount = -1;
+    //     // TO-DO: this should modified to stack the pointcloud even if there is no image to deskew
+    //     if (cloudInfo.isCloud || ++lidarCount % (lidarSkip+1) != 0) 
+    //         return;
 
-        // 0. Filter cloud (downsample and keep only points in camera view)
-        pcl::PointCloud<PointType>::Ptr extractedCloudDS(new pcl::PointCloud<PointType>()); 
-        static pcl::VoxelGrid<PointType> downSizeFilter;
-        downSizeFilter.setLeafSize(0.2, 0.2, 0.2);
-        downSizeFilter.setInputCloud(extractedCloud);
-        downSizeFilter.filter(*extractedCloudDS);
-        *extractedCloud = *extractedCloudDS;
+    //     // 0. Filter cloud (downsample and keep only points in camera view)
+    //     pcl::PointCloud<PointType>::Ptr extractedCloudDS(new pcl::PointCloud<PointType>()); 
+    //     static pcl::VoxelGrid<PointType> downSizeFilter;
+    //     downSizeFilter.setLeafSize(0.2, 0.2, 0.2);
+    //     downSizeFilter.setInputCloud(extractedCloud);
+    //     downSizeFilter.filter(*extractedCloudDS);
+    //     *extractedCloud = *extractedCloudDS;
         
-        pcl::PointCloud<PointType>::Ptr extractedCloudFilter(new pcl::PointCloud<PointType>());
-        for (int i = 0; i < (int) extractedCloud->size(); ++i)
-        {
-            PointType p = extractedCloud->points[i];
-            if (p.z > 0.0 && abs(p.y / p.z) < 10.0 && abs(p.x / p.z) < 10.0)
-            {
-                extractedCloudFilter->push_back(p);
-            }
-        }
-        *extractedCloud = *extractedCloudFilter;
+    //     pcl::PointCloud<PointType>::Ptr extractedCloudFilter(new pcl::PointCloud<PointType>());
+    //     for (int i = 0; i < (int) extractedCloud->size(); ++i)
+    //     {
+    //         PointType p = extractedCloud->points[i];
+    //         if (p.z > 0.0 && abs(p.y / p.z) < 10.0 && abs(p.x / p.z) < 10.0)
+    //         {
+    //             extractedCloudFilter->push_back(p);
+    //         }
+    //     }
+    //     *extractedCloud = *extractedCloudFilter;
         
-        // 1. Transform pointcloud to global 
-        pcl::PointCloud<PointType>::Ptr globalCloud(new pcl::PointCloud<PointType>());
-        Eigen::Affine3f affineW2C = pcl::getTransformation(cloudInfo.initialGuessX, cloudInfo.initialGuessY, cloudInfo.initialGuessZ,
-                                                    cloudInfo.initialGuessRoll, cloudInfo.initialGuessPitch, cloudInfo.initialGuessYaw);
-        pcl::transformPointCloud(*extractedCloud, *globalCloud, affineW2C);
+    //     // 1. Transform pointcloud to global 
+    //     pcl::PointCloud<PointType>::Ptr globalCloud(new pcl::PointCloud<PointType>());
+    //     Eigen::Affine3f affineW2C = pcl::getTransformation(cloudInfo.initialGuessX, cloudInfo.initialGuessY, cloudInfo.initialGuessZ,
+    //                                                 cloudInfo.initialGuessRoll, cloudInfo.initialGuessPitch, cloudInfo.initialGuessYaw);
+    //     pcl::transformPointCloud(*extractedCloud, *globalCloud, affineW2C);
 
-        ROS_WARN("Transform pointcloud global time: %fms", tictoc.toc());
+    //     ROS_WARN("Transform pointcloud global time: %fms", tictoc.toc());
 
-        // 2. Queue the global cloud and time
-        globalCloudQueue.push_back(*globalCloud);
-        timeQueue.push_back(imgDeskewTime);
+    //     // 2. Queue the global cloud and time
+    //     globalCloudQueue.push_back(*globalCloud);
+    //     timeQueue.push_back(imgDeskewTime);
 
-        // 3. Only accumulate recent clouds
-        while (!timeQueue.empty())
-        {
-            if (imgDeskewTime - timeQueue.front() > stackPointTime)
-            {
-                globalCloudQueue.pop_front();
-                timeQueue.pop_front();
-            } else {
-                break;
-            }
-        }
-        accumulatedCloud->clear();
-        int count = 0;
-        for (int i = 0; i < (int)globalCloudQueue.size(); ++i)
-        {
-            *accumulatedCloud += globalCloudQueue[i];
-            count ++;
-        }    
+    //     // 3. Only accumulate recent clouds
+    //     while (!timeQueue.empty())
+    //     {
+    //         if (imgDeskewTime - timeQueue.front() > stackPointTime)
+    //         {
+    //             globalCloudQueue.pop_front();
+    //             timeQueue.pop_front();
+    //         } else {
+    //             break;
+    //         }
+    //     }
+    //     accumulatedCloud->clear();
+    //     int count = 0;
+    //     for (int i = 0; i < (int)globalCloudQueue.size(); ++i)
+    //     {
+    //         *accumulatedCloud += globalCloudQueue[i];
+    //         count ++;
+    //     }    
 
-        ROS_WARN("Add pointcloud time: %fms", tictoc.toc());
+    //     ROS_WARN("Add pointcloud time: %fms", tictoc.toc());
 
-        // // 4. Downsample accumulated global cloud
-        // pcl::PointCloud<PointType>::Ptr accumulatedCloudDS(new pcl::PointCloud<PointType>());
-        // static pcl::VoxelGrid<PointType> downSizeFilter;
-        // downSizeFilter.setLeafSize(0.2, 0.2, 0.2);
-        // downSizeFilter.setInputCloud(accumulatedCloud);
-        // downSizeFilter.filter(*accumulatedCloudDS);
-        // *accumulatedCloud = *accumulatedCloudDS;
-        ROS_WARN("Accumulated %d set of %d pointcloud time: %fms", count, accumulatedCloud->size(), tictoc.toc());
-    }
+    //     // // 4. Downsample accumulated global cloud
+    //     // pcl::PointCloud<PointType>::Ptr accumulatedCloudDS(new pcl::PointCloud<PointType>());
+    //     // static pcl::VoxelGrid<PointType> downSizeFilter;
+    //     // downSizeFilter.setLeafSize(0.2, 0.2, 0.2);
+    //     // downSizeFilter.setInputCloud(accumulatedCloud);
+    //     // downSizeFilter.filter(*accumulatedCloudDS);
+    //     // *accumulatedCloud = *accumulatedCloudDS;
+    //     ROS_WARN("Accumulated %d set of %d pointcloud time: %fms", count, accumulatedCloud->size(), tictoc.toc());
+    // }
 
     bool cachePointCloud(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
     {
@@ -325,8 +322,6 @@ public:
         // abandon pointcloud if its oldest message came earlier than that of imu
         if (!imuQueue.empty())
         {
-            printf("cloud front: %f\n", cloudQueue.front().header.stamp.toSec());
-            printf("imu front: %f\n", imuQueue.front().header.stamp.toSec());
             if (ROS_TIME(&cloudQueue.front()) < ROS_TIME(&imuQueue.front()))
             {
                 cloudQueue.pop_front();
@@ -371,7 +366,6 @@ public:
         cloudHeader = currentCloudMsg.header;
         timeScanCur = cloudHeader.stamp.toSec();
         timeScanEnd = timeScanCur + laserCloudIn->points.back().time;
-
         printf("timeScanCur: %f\n", timeScanCur);
         printf("timeScanEnd: %f\n", timeScanEnd);
 
@@ -427,14 +421,12 @@ public:
         // pop old features
         while (!uvQueue.empty())
         {
-            printf("Front feature size: %d\n", uvQueue.front().points.size());
             if (ROS_TIME(&uvQueue.front()) > start)
             {
                 if (ROS_TIME(&uvQueue.front()) < end)
                 {
                     pointFeature = uvQueue.front();
                     imgDeskewTime = ROS_TIME(&pointFeature);
-                    printf("First image at time: %f\n", imgDeskewTime);
                     return true;
                 }
                 else
@@ -448,7 +440,6 @@ public:
                 uvQueue.pop_front();
             }
         }
-        printf("Empty uv queue\n");
         return false;
     }
 
@@ -471,12 +462,12 @@ public:
 
         odomDeskewInfo(); // odom을 사용하여 translation에 대한 deskewing
 
-        imgDeskewFlag = (imuPointerImg > 0 && cloudInfo.odomAvailable) ? true : false; // imgDeskew only when odom is available
+        // imgDeskewFlag = (imuPointerImg > 0 && cloudInfo.odomAvailable) ? true : false; // imgDeskew only when odom is available
 
-        if (imgDeskewFlag)
-            printf ("\033[32;1m Image Deskew \033[0m\n");
-        else
-            printf ("\033[31;1m No Image Deskew \033[0m\n");
+        // if (imgDeskewFlag)
+        //     printf ("\033[32;1m Image Deskew \033[0m\n");
+        // else
+        //     printf ("\033[31;1m No Image Deskew \033[0m\n");
 
         return true;
     }
@@ -488,11 +479,13 @@ public:
         while (!imuQueue.empty())
         {
             if (imuQueue.front().header.stamp.toSec() < timeScanCur - 0.01)
+            {
                 imuQueue.pop_front();
+            }
             else
                 break;
         }
-
+        
         ROS_WARN("imuQueue size: %d", imuQueue.size());
 
         if (imuQueue.empty())
@@ -553,7 +546,6 @@ public:
             return;
 
         cloudInfo.imuAvailable = true;
-        printf("imuPointerImage: %d, imuPointerCur: %d\n", imuPointerImg, imuPointerCur);
     }
 
     void odomDeskewInfo()
@@ -565,10 +557,13 @@ public:
             // ROS_WARN("imageProjection: queue size: %d", odomQueue.size());
             // printf("odomQueue: %f, scan: %f\n", odomQueue.front().header.stamp.toSec(), timeScanCur);
             if (odomQueue.front().header.stamp.toSec() < timeScanCur - 0.01)
-                odomQueue.pop_front();
+            {
+                odomQueue.pop_front();  
+            }    
             else
                 break;
         }
+       
 
         if (odomQueue.empty())
         {
@@ -608,11 +603,13 @@ public:
         cloudInfo.initialGuessRoll  = roll;
         cloudInfo.initialGuessPitch = pitch;
         cloudInfo.initialGuessYaw   = yaw;
+        ROS_WARN("IP time: %f\n%f, %f, %f, %f, %f, %f", timeScanCur, cloudInfo.initialGuessX, cloudInfo.initialGuessY, cloudInfo.initialGuessZ, cloudInfo.initialGuessRoll, cloudInfo.initialGuessPitch, cloudInfo.initialGuessYaw);
 
         cloudInfo.odomAvailable = true;
 
         // get end odometry at the end of the scan
         odomDeskewFlag = false;
+        
 
         if (odomQueue.back().header.stamp.toSec() < timeScanEnd)
             return;
@@ -795,7 +792,6 @@ public:
             cloudInfo.initialGuessRoll  = camRoll;
             cloudInfo.initialGuessPitch = camPitch;
             cloudInfo.initialGuessYaw   = camYaw;
-            cloudInfo.isCloud = false;
         }
 
         int cloudSize = laserCloudIn->points.size();
@@ -885,7 +881,7 @@ public:
         // 1. Transform pointcloud to camera frame
         pcl::PointCloud<PointType>::Ptr localCloud(new pcl::PointCloud<PointType>());
         pcl::transformPointCloud(*accumulatedCloud, *localCloud, affineW2C.inverse());
-        
+
         // 2. Project depth cloud on the range image and filter points in the same region
         int numBins = 360; 
         vector<vector<PointType>> pointArray;
@@ -1076,7 +1072,6 @@ public:
                     cv_ptr = cv_bridge::toCvCopy(thisImage, sensor_msgs::image_encodings::BGRA8);
                     imgQueue.pop_front();
                     isFound = true;
-                    printf("Found the image\n");
                     break;
                 }
             }

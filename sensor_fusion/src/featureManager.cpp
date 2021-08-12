@@ -1,269 +1,805 @@
-#include "utility.h"
-#include "camodocal/camera_models/CameraFactory.h"
-#include "camodocal/camera_models/CataCamera.h"
-#include "camodocal/camera_models/PinholeCamera.h"
-
-struct smoothness_t{ 
-    float value;
-    size_t ind;
-};
-
-struct by_value{ 
-    bool operator()(smoothness_t const &left, smoothness_t const &right) { 
-        return left.value < right.value;
-    }
-};
+#include "featureManager.h"
 
 const int queueLength = 2000;
 
-class FeatureManager : public ParamServer
+int FeaturePerId::endFrame()
 {
-private:
-    mutex pointLock;
-    mutex imgLock;
-    mutex odomLock;
-    mutex imuLock;
-
-    deque<sensor_msgs::PointCloud> pointQueue;
-    deque<pair<double, sensor_msgs::Image>> imgQueue; 
-    deque<nav_msgs::Odometry> odomQueue;
-    deque<sensor_msgs::Imu> imuQueue;
-
-    ros::Subscriber subPoint;       
-    ros::Subscriber subCloudInfo;    
-    ros::Subscriber subImage;  
-    ros::Subscriber subOdom;
-
-    sensor_msgs::PointCloud pointFeature;
-
-    sensor_fusion::cloud_info cloudInfo;       
-    
-    pcl::PointCloud<PointType>::Ptr currentCloud;
-
-    vector<camodocal::CameraPtr> m_camera;
-    double imgTime;
-
-    double *imuTime = new double[queueLength];
-    double *imuRotX = new double[queueLength];
-    double *imuRotY = new double[queueLength];
-    double *imuRotZ = new double[queueLength];
-    int imuPointerCur;
-
-    float rotXCur, rotYCur, rotZCur;
-    float posXCur, posYCur, posZCur;
-
-    double timeScanStart;
-    double timeScanEnd;
-
-public: 
-    FeatureManager()
-    {
-        subPoint        = nh.subscribe<sensor_msgs::PointCloud>("/fusion/visual/point", 1000, &FeatureManager::pointHandler, this, ros::TransportHints().tcpNoDelay());
-        subCloudInfo    = nh.subscribe<sensor_fusion::cloud_info>("/fusion/deskew/cloud_info", 1000, &FeatureManager::cloudInfoHandler, this, ros::TransportHints().tcpNoDelay());
-        subImage        = nh.subscribe<sensor_msgs::Image>(imgTopic, 1000, &FeatureManager::imgHandler, this, ros::TransportHints().tcpNoDelay());
-        subOdom         = nh.subscribe<nav_msgs::Odometry>(odomTopic+"_incremental", 2000, &FeatureManager::odometryHandler, this, ros::TransportHints().tcpNoDelay());
-
-        allocateMemory();
-    }  
-
-    void allocateMemory()
-    {
-        currentCloud.reset(new pcl::PointCloud<PointType>());
-        resetParameters();
-
-         // get camera info
-        for (size_t i = 0; i < CAM_NAMES.size(); i++)
-        {
-            ROS_DEBUG("reading paramerter of camera %s", CAM_NAMES[i].c_str());
-            FILE *fh = fopen(CAM_NAMES[i].c_str(), "r");
-            if (fh == NULL)
-            {
-                ROS_WARN("config_file doesn't exist");
-                ROS_BREAK();
-                return;
-            }
-            fclose(fh);
-
-            camodocal::CameraPtr camera = camodocal::CameraFactory::instance()->generateCameraFromYamlFile(CAM_NAMES[i]);
-            m_camera.push_back(camera);
-        }
-    }
-
-    void resetParameters()
-    {
-        currentCloud->clear();
-        imgTime = -1;
-        imuPointerCur = 0;
-
-        // reset queue
-        for (int i = 0; i < queueLength; ++i)
-        {
-            imuTime[i] = 0;
-            imuRotX[i] = 0;
-            imuRotY[i] = 0;
-            imuRotZ[i] = 0;
-        } 
-    }
-
-    void imuHandler(const sensor_msgs::Imu::ConstPtr& imuMsg)
-    {
-        sensor_msgs::Imu thisImu = imuConverter(*imuMsg);
-        std::lock_guard<std::mutex> lock(imuLock);
-        imuQueue.push_back(thisImu);
-    }
-
-    void odometryHandler(const nav_msgs::Odometry::ConstPtr& odometryMsg)
-    {
-        lock_guard<mutex> lock(odomLock);
-        odomQueue.push_back(*odometryMsg);
-    }
-
-    void pointHandler(const sensor_msgs::PointCloudConstPtr &msg)
-    {
-        lock_guard<mutex> lock(pointLock);
-        pointQueue.push_back(*msg);
-    }
-
-    void imgHandler(const sensor_msgs::ImageConstPtr &imgMsg)
-    {
-        lock_guard<mutex> lock(imgLock);
-        imgQueue.push_back(make_pair(ROS_TIME(imgMsg), *imgMsg));
-    }
-
-
-    void cloudInfoHandler(const sensor_fusion::cloud_info::ConstPtr &cloudInfoMsg)
-    {
-        cloudInfo = *cloudInfoMsg;
-
-        if (!cloudInfo.odomAvailable || !cloudInfo.imuAvailable) // odomAvailable
-            return;
-        
-        timeScanStart = cloudInfo.header.stamp.toSec();
-        timeScanEnd = timeScanStart + 0.1; // 10 Hz
-
-        if (!getImageBetween())
-        {
-            printf ("\033[31;1m Image Not Available \033[0m\n");
-            return;
-        } else {
-            printf ("\033[32;1m Image Available \033[0m\n");
-            printf("imgDeskewTime: %f\n", imgTime);
-        }
-
-        if (!findRotation())
-            return;
-
-        
-
-    }
-
-    bool findPosition()
-    {
-
-    }
-
-    bool findRotation()
-    {
-        while (!imuQueue.empty())
-        {
-            if (ROS_TIME(&imuQueue.front()) < timeScanStart - 0.01)
-                imuQueue.pop_front();
-            else
-                break;
-        }
-        
-        if (imuQueue.empty())
-            return false;
-        
-        imuPointerCur = 0;
-
-        for (int i = 0; i < (int)imuQueue.size(); ++i)
-        {
-            sensor_msgs::Imu thisImuMsg = imuQueue[i];
-            double currentImuTime = ROS_TIME(&thisImuMsg);
-
-            if (currentImuTime > timeScanEnd + 0.01)
-                break;
-            
-            if (imuPointerCur == 0)
-            {
-                imuRotX[0] = 0.0;
-                imuRotY[0] = 0.0;
-                imuRotZ[0] = 0.0;
-                imuTime[0] = currentImuTime;
-                ++imuPointerCur;
-                continue;
-            }
-
-            if (currentImuTime <= imgTime)
-            {
-                double angularX, angularY, angularZ;
-                imuAngular2rosAngular(&thisImuMsg, &angularX, &angularY, &angularZ);
-                double timeDiff = currentImuTime - imuTime[imuPointerCur-1];
-                imuRotX[imuPointerCur] = imuRotX[imuPointerCur-1] + angularX * timeDiff;
-                imuRotY[imuPointerCur] = imuRotY[imuPointerCur-1] + angularY * timeDiff;
-                imuRotZ[imuPointerCur] = imuRotZ[imuPointerCur-1] + angularZ * timeDiff;
-                imuTime[imuPointerCur] = currentImuTime;
-                ++imuPointerCur;                
-            }
-        }
-
-        if (imuPointerCur > 0)
-        {
-            int imuPointerPrev = imuPointerCur - 1;
-            double ratioFront = (imgTime - imuTime[imuPointerPrev]) / (imuTime[imuPointerCur] - imuTime[imuPointerPrev]);
-            double ratioBack  = (imuTime[imuPointerCur] - imgTime) /  (imuTime[imuPointerCur] - imuTime[imuPointerPrev]);
-            rotXCur = imuRotX[imuPointerCur] * ratioFront + imuRotX[imuPointerPrev] * ratioBack;
-            rotYCur = imuRotY[imuPointerCur] * ratioFront + imuRotY[imuPointerPrev] * ratioBack;
-            rotZCur = imuRotZ[imuPointerCur] * ratioFront + imuRotZ[imuPointerPrev] * ratioBack;
-            printf("imgPointer at %d from queue size %d \n", imuPointerCur, imuQueue.size());
-            ROS_WARN("rotXCur: %f, rotYCur: %f, rotZCur: %f\n", rotXCur, rotYCur, rotZCur);
-            return true;
-        }
-
-        return false;
-    }
-
-    bool getImageBetween()
-    {
-        lock_guard<mutex> lock(pointLock);
-        
-        while (!pointQueue.empty())
-        {
-            if (ROS_TIME(&pointQueue.front()) > timeScanStart)
-            {
-                if (ROS_TIME(&pointQueue.front()) < timeScanEnd)
-                {
-                    pointFeature = pointQueue.front();
-                    imgTime = ROS_TIME(&pointFeature);
-                    printf("Image at time: %f\n", imgTime);
-                    return true;
-                }
-                else
-                {
-                    imgTime = -1;
-                    return false;
-                }
-            } else {
-                pointQueue.pop_front();
-            }
-        }
-        printf("Empty point queue\n");
-        return false;
-    }
-
-};
-
-
-int main(int argc, char** argv)
-{
-    ros::init(argc, argv, "sensor_fusion");
-
-    FeatureManager FE;
-
-    ROS_INFO("\033[1;32m----> Feature Manager Started.\033[0m");
-   
-    ros::spin();
-
-    return 0;
+    return startFrame + featurePerFrame.size() - 1;
 }
+
+FeatureManager::FeatureManager()
+{
+    pubImgProjected = nh.advertise<sensor_msgs::Image>("/fusion/visual/projected_img", 1);
+
+    allocateMemory();
+}  
+
+void FeatureManager::allocateMemory()
+{
+    currentCloud.reset(new pcl::PointCloud<PointType>());
+    laserCloudNearby.reset(new pcl::PointCloud<PointType>());
+
+    //     // get camera info
+    // for (size_t i = 0; i < CAM_NAMES.size(); i++)
+    // {
+    //     ROS_DEBUG("reading paramerter of camera %s", CAM_NAMES[i].c_str());
+    //     FILE *fh = fopen(CAM_NAMES[i].c_str(), "r");
+    //     if (fh == NULL)
+    //     {
+    //         ROS_WARN("config_file doesn't exist");
+    //         ROS_BREAK();
+    //         return;
+    //     }
+    //     fclose(fh);
+
+    //     camodocal::CameraPtr camera = camodocal::CameraFactory::instance()->generateCameraFromYamlFile(CAM_NAMES[i]);
+    //     m_camera.push_back(camera);
+    // }
+
+    resetParameters();
+}
+
+void FeatureManager::resetParameters()
+{
+    currentCloud->clear();
+    timeSent = 0.0;
+    frameCount = 0;
+    keyframeCount = 0;
+}
+
+void FeatureManager::inputCloudNearby(const pcl::PointCloud<PointType>::Ptr cloudIn)
+{
+    lock_guard<mutex> lock(lidarLock);
+    laserCloudNearby->clear();
+    pcl::copyPointCloud(*cloudIn, *laserCloudNearby);
+    printf("CloudNearby size: %d\n", (int)laserCloudNearby->size());
+}
+
+void FeatureManager::inputIMU(const sensor_msgs::Imu imuIn)
+{
+    std::lock_guard<std::mutex> lock(imuLock);
+    imuQueue.push_back(imuIn);
+}
+
+void FeatureManager::inputPointFeature(const sensor_msgs::PointCloud pointIn)
+{
+    TicToc tictoc;
+    pointFeature = pointIn;
+    timeImageCur = ROS_TIME(&pointIn);
+
+    if (!updateInitialPose())
+    {
+        ROS_WARN("PointHandler: updateInitialPose failure");
+        return;
+    }
+
+    if (!pointInfo.odomAvailable)
+    {
+        ROS_WARN("PointHandler: odom not available");
+        return;
+    }
+
+    if (addPointFeature())
+    {
+        associatePointFeature();
+        frameCount++;
+    } else {
+        frameCount++;
+        return;
+    }
+    ROS_WARN("FM: frameCount: %d\n", frameCount);
+    ROS_WARN("Manage point time: %fms\n", tictoc.toc());
+    pointInfo.header = pointIn.header;
+    pointInfo.point_feature = pointFeature;
+    featLock.lock();
+    tempQueue.push_back(pointInfo);
+    featLock.unlock();
+}
+    
+void FeatureManager::inputCloudInfo(const sensor_fusion::cloud_info cloudInfoIn)
+{
+    cloudInfo = cloudInfoIn;
+
+    timeCloudInfoCur = ROS_TIME(&cloudInfoIn);
+    
+    printf("CloudInfoHandler: %f\n", timeCloudInfoCur);
+
+    manageCloudFeature();
+
+    printf("Timesent: %f; cloud time: %f \n", timeSent, timeCloudInfoCur);
+    // TO-DO: Feature extraction and publish
+    featLock.lock();
+    featureQueue.push_back(cloudInfo);
+    featLock.unlock();
+
+    timeSent = timeCloudInfoCur;
+}
+
+void FeatureManager::inputOdom(const nav_msgs::Odometry odomIn)
+{
+    lock_guard<mutex> lock(odomLock);
+    odomQueue.push_back(odomIn);
+}
+
+void FeatureManager::inputImage(const sensor_msgs::Image imgIn)
+{
+    lock_guard<mutex> lock(imgLock);
+    imgQueue.push_back(make_pair(ROS_TIME(&imgIn), imgIn));
+}
+
+void FeatureManager::removeOldFeatures(double refTime)
+{
+    lock_guard<mutex> lock(pointLock);
+
+    for (auto it = pointFeaturesPerId.begin(), it_next = pointFeaturesPerId.begin(); it != pointFeaturesPerId.end(); it = it_next)
+    {
+        it_next++;
+
+        int lastIdx = it->endFrame() - it->startFrame;
+
+        if (it->featurePerFrame.at(lastIdx).timestamp < refTime)
+        {
+            pointFeaturesPerId.erase(it);
+        }
+    }
+
+    while(!pointQueue.empty())
+    {
+        FeaturePerFrame fpf = pointQueue.front().second;
+        if (fpf.timestamp < refTime)
+        {
+            pointQueue.pop_front();
+        }
+    }
+}
+
+bool FeatureManager::addPointFeature() // check keyframe and add if it is a keyframe
+{
+    TicToc tictoc;
+    float parallaxSum = 0;
+    int parallaxNum = 0;
+    int lastTrackNum = 0;
+    int newFeatureNum = 0;
+    int longTrackNum = 0;
+    bool isKey = false;
+
+    for (int i = 0; i < pointFeature.points.size(); ++i)
+    {
+        Eigen::Matrix<float, 6, 1> feature;
+        Eigen::Matrix<float, 6, 1> initPose;
+        int featureId = (int) pointFeature.channels[0].values[i];
+        feature(0)  = pointFeature.points[i].x;
+        feature(1)  = pointFeature.points[i].y;
+        feature(2)  = pointFeature.channels[4].values[i];
+        feature(3)  = pointFeature.channels[5].values[i];
+        feature(4)  = pointFeature.channels[6].values[i];
+        feature(5)  = pointFeature.channels[7].values[i];
+        initPose(0) = pointInfo.initialGuessX;
+        initPose(1) = pointInfo.initialGuessY;
+        initPose(2) = pointInfo.initialGuessZ;
+        initPose(3) = pointInfo.initialGuessRoll;
+        initPose(4) = pointInfo.initialGuessPitch;
+        initPose(5) = pointInfo.initialGuessYaw;
+        
+        FeaturePerFrame fpf(feature, initPose, timeImageCur);
+        
+        auto it = find_if(pointFeaturesPerId.begin(), pointFeaturesPerId.end(), [featureId](const FeaturePerId &it)
+                    {
+                        return it.featureId == featureId;
+                    });
+        if (it == pointFeaturesPerId.end())
+        {
+            pointFeaturesPerId.push_back(FeaturePerId(featureId, frameCount, timeImageCur));
+            pointFeaturesPerId.back().featurePerFrame.push_back(fpf);
+            newFeatureNum++;
+        }
+        else if (it->featureId == featureId)
+        {
+            it->featurePerFrame.push_back(fpf);
+            lastTrackNum++;
+            if (it->featurePerFrame.size() >= 4)
+                longTrackNum++;
+        }
+    }
+
+    // lastTrackNum: # of features that have already existed previously --> smaller means there are more fresh features = keyframe
+    // longTrackNum: # of features that have existed for more than 4 frames --> smaller means there are more fresh features = keyframe
+    // newFeatureNum > 0.5 * lastTrackNum: more fresh feature are there than 0.5 * those have been tracked before  
+    // printf("key: %d, frame: %d, lastTrackNum: %d, longTrackNum: %d, newFeatureNum: %d\n", keyframeCount, frameCount, lastTrackNum, longTrackNum, newFeatureNum);
+    if (frameCount < 2 || lastTrackNum < 20 || longTrackNum < 40 || newFeatureNum > 0.5 * lastTrackNum)    
+        isKey = true;
+    else
+    {
+        for (auto &it : pointFeaturesPerId)
+        {    
+            if (it.startFrame <= keyframeCount - 2 && it.startFrame + int(it.featurePerFrame.size()) > frameCount)
+            {
+                parallaxSum += compensatedParallax2(it);
+                parallaxNum++;
+            }
+        }
+
+        if (parallaxNum == 0)
+        {
+            isKey = true;
+        }
+        else {
+            // printf("parallax_sum: %lf, parallax_num: %d\n", parallaxSum, parallaxNum);
+            // printf("current parallax: %lf\n", parallaxSum / parallaxNum);
+            isKey = parallaxSum / parallaxNum >= MIN_PARALLAX;
+        }
+    }
+
+    if (isKey)
+    {
+        keyframeCount = frameCount;
+        for (auto &it : pointFeaturesPerId)
+        {
+            if (keyframeCount - it.startFrame < (int)it.featurePerFrame.size())
+            {
+                printf("Key %d: StartFrame: %d, keyFrame: %d, frame: %d, fpf size: %d\n", it.featureId, it.startFrame, keyframeCount, frameCount, (int)it.featurePerFrame.size());
+                pointLock.lock();
+                pointQueue.push_back(make_pair(it.featureId, it.featurePerFrame.at(keyframeCount - it.startFrame)));
+                pointLock.unlock();
+            }
+        }
+    }
+    ROS_WARN("Add point feature time: %fms\n", tictoc.toc());
+
+    return isKey;
+}
+
+float FeatureManager::compensatedParallax2(const FeaturePerId &it)
+{
+    // printf("%d: StartFrame: %d, keyFrame: %d, frame: %d, fpf size: %d\n", it.featureId, it.startFrame, keyframeCount, frameCount, (int)it.featurePerFrame.size());
+
+    //check the second last frame is keyframe or not
+    //parallax betwwen seconde last frame and third last frame
+    const FeaturePerFrame &frame_i = it.featurePerFrame[keyframeCount - 1 - it.startFrame];
+    const FeaturePerFrame &frame_j = it.featurePerFrame[frameCount - it.startFrame];
+
+    float ans = 0;
+    Vector3f p_j = frame_j.point;
+
+    float u_j = p_j(0);
+    float v_j = p_j(1);
+
+    Vector3f p_i = frame_i.point;
+    Vector3f p_i_comp;
+
+    //int r_i = frame_count - 2;
+    //int r_j = frame_count - 1;
+    //p_i_comp = ric[camera_id_j].transpose() * Rs[r_j].transpose() * Rs[r_i] * ric[camera_id_i] * p_i;
+    p_i_comp = p_i;
+    float dep_i = p_i(2);
+    float u_i = p_i(0) / dep_i;
+    float v_i = p_i(1) / dep_i;
+    float du = u_i - u_j, dv = v_i - v_j;
+
+    float dep_i_comp = p_i_comp(2);
+    float u_i_comp = p_i_comp(0) / dep_i_comp;
+    float v_i_comp = p_i_comp(1) / dep_i_comp;
+    float du_comp = u_i_comp - u_j, dv_comp = v_i_comp - v_j;
+
+    ans = max(ans, sqrt(min(du * du + dv * dv, du_comp * du_comp + dv_comp * dv_comp)));
+
+    return ans;
+}
+
+void FeatureManager::processFeature()
+{
+    while(1)
+    {
+        if (!featureQueue.empty())
+        {
+            sensor_fusion::cloud_info thisFeature = tempQueue.front();
+
+            double currentTime = ROS_TIME(&thisFeature);
+
+            if (currentTime < timeSent)
+            {
+                featLock.lock();
+                tempQueue.pop_front();
+                featLock.unlock();
+                continue;
+            } 
+
+            // TO-DO: what if timeSent does not change because pointcloud stops coming in?
+            if (currentTime >= timeSent && currentTime < timeSent + 0.08)
+            {
+                featLock.lock();
+                tempQueue.pop_front();
+                featureQueue.push_back(thisFeature);
+                featLock.unlock();
+                printf("Timesent: %f; image time: %f \n", timeSent, currentTime);
+            }
+
+
+        }
+
+        std::chrono::milliseconds dura(2);
+        std::this_thread::sleep_for(dura);
+    }
+}
+
+void FeatureManager::updateImuRPY()
+{
+    // use imu orientation
+    pointInfo.imuAvailable = false;
+
+    while (!imuQueue.empty())
+    {
+        if (ROS_TIME(&imuQueue.front()) < timeImageCur - 0.01)
+            imuQueue.pop_front();
+        else
+            break;
+    }
+
+    if (imuQueue.empty())
+        return;
+
+    for (int i = 0; i < (int) imuQueue.size(); ++i)
+    {
+        sensor_msgs::Imu thisImu = imuQueue[i];
+        double timeImuCur = ROS_TIME(&thisImu);
+        if (timeImuCur <= timeImageCur)
+            imuRPY2rosRPY(&thisImu, &pointInfo.imuRollInit, &pointInfo.imuPitchInit, &pointInfo.imuYawInit);
+        
+        if (timeImuCur > timeImageCur)
+        {
+            pointInfo.imuAvailable = true;
+            break;
+        }
+    }
+
+    if (pointInfo.imuAvailable)
+    {
+        Eigen::Affine3f imuInitRPY = pcl::getTransformation(0.0, 0.0, 0.0, pointInfo.imuRollInit, pointInfo.imuPitchInit, pointInfo.imuYawInit);
+        float x, y, z, roll, pitch, yaw;
+        pcl::getTranslationAndEulerAngles(affineL2C, x, y, z, roll, pitch, yaw);
+        Eigen::Affine3f transformIncre = pcl::getTransformation(0.0, 0.0, 0.0, roll, pitch, yaw);
+        Eigen::Affine3f camInitRPY = imuInitRPY * transformIncre;
+        pcl::getTranslationAndEulerAngles(camInitRPY, x, y, z, pointInfo.imuRollInit, pointInfo.imuPitchInit, pointInfo.imuYawInit);
+    }
+}
+
+void FeatureManager::updateOdometry()
+{
+    pointInfo.odomAvailable = false;
+
+        // get odometry 
+    while (!odomQueue.empty())
+    {
+        if (ROS_TIME(&odomQueue.front()) < timeImageCur - 0.01)
+            odomQueue.pop_front();
+        else
+            break;
+    }
+    if (odomQueue.empty())
+        return;
+
+    if (ROS_TIME(&odomQueue.front()) > timeImageCur)
+        return;
+
+    nav_msgs::Odometry startOdomMsg;
+    
+    for(int i = 0; i < (int)odomQueue.size(); ++i)
+    {
+        startOdomMsg = odomQueue[i];
+        if (ROS_TIME(&startOdomMsg) < timeImageCur)
+        {
+            continue;
+        } else {
+            pointInfo.odomAvailable = true;
+            break;
+        }
+    }
+
+    if (pointInfo.odomAvailable)
+    {
+        tf::Quaternion orientation;
+        tf::quaternionMsgToTF(startOdomMsg.pose.pose.orientation, orientation);
+        
+        double roll, pitch, yaw;
+        tf::Matrix3x3(orientation).getRPY(roll, pitch, yaw);
+        ROS_WARN("FM time: %f\n%f, %f, %f, %f, %f, %f", timeImageCur, startOdomMsg.pose.pose.position.x, startOdomMsg.pose.pose.position.y,  startOdomMsg.pose.pose.position.z, roll, pitch, yaw);
+
+        transWorld2Cam = pcl::getTransformation(startOdomMsg.pose.pose.position.x, startOdomMsg.pose.pose.position.y, startOdomMsg.pose.pose.position.z,
+                                            (float) roll, (float) pitch, (float) yaw) * affineL2C;
+        pcl::getTranslationAndEulerAngles(transWorld2Cam, pointInfo.initialGuessX, pointInfo.initialGuessY, pointInfo.initialGuessZ,
+                                                            pointInfo.initialGuessRoll, pointInfo.initialGuessPitch, pointInfo.initialGuessYaw);
+    }
+}
+
+bool FeatureManager::updateInitialPose()
+{
+    lock_guard<mutex> lock1(imuLock);
+    lock_guard<mutex> lock2(odomLock);
+
+    if (imuQueue.empty() || ROS_TIME(&imuQueue.front()) > timeImageCur)
+    {
+        ROS_DEBUG("Waiting for IMU data ...");
+        return false;
+    }
+
+    updateImuRPY();
+
+    updateOdometry();
+    
+    return true;
+}
+
+void FeatureManager::manageCloudFeature()
+{
+    TicToc tictoc;
+    if (cloudInfo.imuAvailable)
+    {        
+        Eigen::Affine3f imuInitRPY = pcl::getTransformation(0.0, 0.0, 0.0, cloudInfo.imuRollInit, cloudInfo.imuPitchInit, cloudInfo.imuYawInit);
+        float x, y, z, roll, pitch, yaw;
+        pcl::getTranslationAndEulerAngles(affineL2C, x, y, z, roll, pitch, yaw);
+        Eigen::Affine3f transformIncre = pcl::getTransformation(0.0, 0.0, 0.0, roll, pitch, yaw);
+        Eigen::Affine3f camInitRPY = imuInitRPY * transformIncre;
+        pcl::getTranslationAndEulerAngles(camInitRPY, x, y, z, cloudInfo.imuRollInit, cloudInfo.imuPitchInit, cloudInfo.imuYawInit);
+    }
+    
+    if (cloudInfo.odomAvailable)
+    {
+        Eigen::Affine3f transInit = pcl::getTransformation(cloudInfo.initialGuessX, cloudInfo.initialGuessY, cloudInfo.initialGuessZ, 
+                                                cloudInfo.initialGuessRoll, cloudInfo.initialGuessPitch, cloudInfo.initialGuessYaw) * affineL2C;
+        pcl::getTranslationAndEulerAngles(transInit, cloudInfo.initialGuessX, cloudInfo.initialGuessY, cloudInfo.initialGuessZ,
+                                                        cloudInfo.initialGuessRoll, cloudInfo.initialGuessPitch, cloudInfo.initialGuessYaw);
+    }
+
+    // transform deskewed points
+    pcl::PointCloud<PointType>::Ptr cloudOut(new pcl::PointCloud<PointType>());
+    pcl::fromROSMsg(cloudInfo.cloud_deskewed, *cloudOut);
+    PointTypePose transformPose = trans2PointTypePose(affineL2C.inverse());
+    *cloudOut = *transformPointCloud(cloudOut, &transformPose);
+    pcl::toROSMsg(*cloudOut, cloudInfo.cloud_deskewed);
+    publishCloud(&pubExtractedCloudCam, cloudOut, cloudInfo.header.stamp, camFrame);
+    ROS_WARN("Manage cloud feature time: %fms\n", tictoc.toc());
+}
+
+void FeatureManager::associatePointFeature()
+{
+    TicToc tictoc;
+
+    lock_guard<mutex> lock(lidarLock);
+
+    // sensor_msgs::ChannelFloat32 depths;
+    // depths.name = "depth";
+    // depths.values.resize(pointFeature.points.size(), -1); // -1 for initial depth
+    int count = 0;
+
+    if (laserCloudNearby->size() == 0)
+    {
+        printf("No cloud nearby\n");
+        return;
+    }
+
+    // 1. Transform pointcloud to camera frame
+    pcl::PointCloud<PointType>::Ptr localCloud(new pcl::PointCloud<PointType>());
+    PointTypePose transformPose = trans2PointTypePose(transWorld2Cam.inverse());
+    *localCloud = *transformPointCloud(laserCloudNearby, &transformPose);
+
+    // 2. Project depth cloud on the range image and filter points in the same region
+    int numBins = 360; 
+    vector<vector<PointType>> pointArray;
+    pointArray.resize(numBins);
+    for (int i = 0; i < numBins; ++i)
+        pointArray[i].resize(numBins);
+    float angRes = 180.0 / float(numBins); // cover only -90~90 FOV of the lidar 
+    cv::Mat rangeImage = cv::Mat(numBins, numBins, CV_32F, cv::Scalar::all(FLT_MAX));
+
+    for (int i = 0; i < (int)localCloud->size(); ++i)
+    {
+        PointType p = localCloud->points[i];
+        if (p.z > 0.0 && abs(p.y / p.z) < 10.0 && abs(p.x / p.z) < 10.0)
+        {
+            // Horizontal: 0 [deg] (x > 0) ~ 180 [deg] (x < 0) w.r.t x-axis
+            float horizonAngle = atan2(p.z, p.x) * 180.0 / M_PI; 
+            int colIdx = round(horizonAngle / angRes);
+
+            // Vertical: -90 [deg] (y < 0) ~ 90 [deg] (y > 0) w.r.t xz plane
+            float verticalAngle = atan2(p.y, sqrt(p.x*p.x+p.z*p.z)) * 180.0 / M_PI;
+            int rowIdx = round((verticalAngle + 90.0) / angRes);
+
+            if (colIdx >= 0 && colIdx < numBins && rowIdx >= 0 && rowIdx < numBins)
+            {
+                float range = pointDistance(p);
+                if (range < rangeImage.at<float>(rowIdx, colIdx))
+                {
+                    rangeImage.at<float>(rowIdx, colIdx) = range; 
+                    pointArray[rowIdx][colIdx] = p; 
+                }
+            }
+        }
+    }
+
+    // 3. Extract cloud from the range image
+    pcl::PointCloud<PointType>::Ptr localCloudFiltered(new pcl::PointCloud<PointType>());
+    for (int i = 0; i < numBins; ++i)
+    {
+        for (int j = 0; j < numBins; ++j)
+        {
+            if (rangeImage.at<float>(i,j) != FLT_MAX)
+                localCloudFiltered->push_back(pointArray[i][j]);
+        }
+    }
+
+    // 4. Project pointcloud onto a unit sphere
+    pcl::PointCloud<PointType>::Ptr localCloudSphere(new pcl::PointCloud<PointType>());
+    for (int i = 0; i < (int)localCloudFiltered->size(); ++i)
+    {
+        PointType p = localCloudFiltered->points[i];
+        float range = pointDistance(p);
+        p.x /= range;
+        p.y /= range;
+        p.z /= range;
+        p.intensity = range;
+        localCloudSphere->push_back(p);
+    }
+
+    // TO-DO: cloudInfo LiDAR로 변경 필요
+    if (localCloudSphere->size() < 10) 
+        return;
+
+    // No need
+    cv_bridge::CvImagePtr cv_ptr;
+    bool isFound = false;
+    {
+        lock_guard<mutex> lock4(imgLock);
+        
+        while (!imgQueue.empty())
+        {
+            if (imgQueue.front().first < timeImageCur)
+            {
+                imgQueue.pop_front();
+            }
+            else if (imgQueue.front().first == timeImageCur)
+            {
+                // cv::Mat grayImage = imgQueue.front().second;
+                // cvtColor(grayImage, thisImage, CV_GRAY2RGB);
+                sensor_msgs::Image thisImage = imgQueue.front().second;
+                cv_ptr = cv_bridge::toCvCopy(thisImage, sensor_msgs::image_encodings::BGRA8);
+                imgQueue.pop_front();
+                isFound = true;
+                printf("Found the image\n");
+                break;
+            }
+        }
+    }
+
+    // 5. Project 2D point feature to unit sphere
+    pcl::PointCloud<PointType>::Ptr pointSphere(new pcl::PointCloud<PointType>());
+    std::vector<FeaturePerId*> iterCandidate;        
+    for (auto &it : pointFeaturesPerId)
+    {            
+        int lastIndex = it.startFrame + it.featurePerFrame.size() - 1;
+        if ((int) it.featurePerFrame.size() >= 2 && lastIndex == keyframeCount)
+        {            
+            Eigen::Vector3f thisFeature = it.featurePerFrame.back().point;
+            thisFeature.normalize();
+            PointType p;
+            p.x = thisFeature(0);
+            p.y = thisFeature(1);
+            p.z = thisFeature(2);
+            p.intensity = -1; // depth
+            iterCandidate.push_back(&it);
+            pointSphere->push_back(p);
+            if (!it.isDepth)
+            {
+                cv::Point2f uv(it.featurePerFrame.back().uv.x(), it.featurePerFrame.back().uv.y());
+                cv::circle(cv_ptr->image, uv, 3, cv::Scalar(0, 0, 255), -1);
+            }
+            else
+            {
+                cv::Point2f uv(it.featurePerFrame.back().uv.x(), it.featurePerFrame.back().uv.y());
+                cv::circle(cv_ptr->image, uv, 3, cv::Scalar(0, 255, 255), -1);
+            }
+        }
+    }
+
+    // for (int i = 0; i < (int)pointFeature.points.size(); ++i)
+    // {
+    //     Eigen::Vector3f thisFeature(pointFeature.points[i].x, pointFeature.points[i].y, 1.0);
+    //     thisFeature.normalize();
+    //     PointType p;
+    //     p.x = thisFeature(0);
+    //     p.y = thisFeature(1);
+    //     p.z = thisFeature(2);
+    //     p.intensity = -1; // depth
+    //     pointSphere->push_back(p);
+    // }
+
+    // 6. create kd-tree
+    pcl::KdTreeFLANN<PointType>::Ptr kdTree(new pcl::KdTreeFLANN<PointType>());
+    kdTree->setInputCloud(localCloudSphere);
+
+    pcl::PointCloud<PointType>::Ptr threePoints(new pcl::PointCloud<PointType>());
+    
+    // 7. find feature depth using kd-tree
+    vector<int> pointSearchIdx;
+    vector<float> pointSearchSquaredDist;
+    float distThres = pow(sin(angRes / 180.0 * M_PI) * depthAssociateBinNumber, 2); 
+    for (int i = 0; i < (int)pointSphere->size(); ++i)
+    {
+        PointType p = pointSphere->points[i];
+        kdTree->nearestKSearch(p, 3, pointSearchIdx, pointSearchSquaredDist);
+        // Three nearest are found and the farthest is within the threshold
+        // DEBUG
+        threePoints->push_back(localCloudSphere->points[pointSearchIdx[0]]);      
+        threePoints->push_back(localCloudSphere->points[pointSearchIdx[1]]);      
+        threePoints->push_back(localCloudSphere->points[pointSearchIdx[2]]);      
+
+        if (pointSearchIdx.size() == 3 && pointSearchSquaredDist[2] < distThres)
+        {
+            float x0 = localCloudSphere->points[pointSearchIdx[0]].x;
+            float y0 = localCloudSphere->points[pointSearchIdx[0]].y;
+            float z0 = localCloudSphere->points[pointSearchIdx[0]].z;
+            float r0 = localCloudSphere->points[pointSearchIdx[0]].intensity;
+            Vector3f A(x0*r0, y0*r0, z0*r0);
+
+            float x1 = localCloudSphere->points[pointSearchIdx[1]].x;
+            float y1 = localCloudSphere->points[pointSearchIdx[1]].y;
+            float z1 = localCloudSphere->points[pointSearchIdx[1]].z;
+            float r1 = localCloudSphere->points[pointSearchIdx[1]].intensity;
+            Vector3f B(x1*r1, y1*r1, z1*r1);
+
+            float x2 = localCloudSphere->points[pointSearchIdx[2]].x;
+            float y2 = localCloudSphere->points[pointSearchIdx[2]].y;
+            float z2 = localCloudSphere->points[pointSearchIdx[2]].z;
+            float r2 = localCloudSphere->points[pointSearchIdx[2]].intensity;
+            Vector3f C(x2*r2, y2*r2, z2*r2);
+
+            Vector3f V(p.x, p.y, p.z);
+            Vector3f N = (A-B).cross(B-C);
+            
+            float depth = (N(0) * A(0) + N(1) * A(1) + N(2) * A(2)) 
+                            / (N(0) * V(0) + N(1) * V(1) + N(2) * V(2));
+            float minDepth = min(r0, min(r1, r2));
+            float maxDepth = max(r0, max(r1, r2));
+            
+            if (maxDepth - minDepth > 2 || depth <= 0.5)
+                continue;
+            else if (depth > maxDepth)
+                depth = maxDepth;
+            else if (depth < minDepth)
+                depth = minDepth;
+
+            // de-normalized the 3D unit sphere feature
+            pointSphere->points[i].x *= depth;
+            pointSphere->points[i].y *= depth;
+            pointSphere->points[i].z *= depth;
+            pointSphere->points[i].intensity = pointSphere->points[i].z;
+        
+            // update 3D point feature (sensor_msgs::PointCloud)
+            if (pointSphere->points[i].intensity > lidarMinRange && pointSphere->points[i].intensity < lidarMaxRange)
+            {
+                iterCandidate[i]->featurePerFrame.back().estimatedDepth = pointSphere->points[i].intensity;
+                iterCandidate[i]->featurePerFrame.back().point3d.x() = pointSphere->points[i].x;
+                iterCandidate[i]->featurePerFrame.back().point3d.y() = pointSphere->points[i].y;
+                iterCandidate[i]->featurePerFrame.back().point3d.z() = pointSphere->points[i].z;
+                printf("id: %d, cur: %d, keyframe: %d, depth: %f\n", iterCandidate[i]->featureId, iterCandidate[i]->featurePerFrame.size()-1, keyframeCount, iterCandidate[i]->featurePerFrame.back().estimatedDepth);
+                // depths.values[i] = pointSphere->points[i].intensity;
+                if (iterCandidate[i]->isDepth == false)
+                    iterCandidate[i]->isDepth = true;
+                // ROS_WARN("Association Status");
+                // printf("%d: xyz -> %f, %f, %f; uv -> %f, %f\n", 
+                //         iterCandidate[i]->featureId, 
+                //         iterCandidate[i]->estimatedXYZ.x(),
+                //         iterCandidate[i]->estimatedXYZ.y(),
+                //         iterCandidate[i]->estimatedXYZ.z(),
+                //         iterCandidate[i]->featurePerFrame.back().uv.x(), 
+                //         iterCandidate[i]->featurePerFrame.back().uv.y());
+                if (isFound)
+                {
+                    cv::Point2f uv(iterCandidate[i]->featurePerFrame.back().uv.x(), iterCandidate[i]->featurePerFrame.back().uv.y());
+                    cv::circle(cv_ptr->image, uv, 3, cv::Scalar(0, 255, 0), -1);
+                }
+                count++;
+                // pointFeature.channels[1].values[i] = pointSphere->points[i].x;
+                // pointFeature.channels[2].values[i] = pointSphere->points[i].y;
+                // pointFeature.channels[3].values[i] = pointSphere->points[i].z;
+            }
+        }
+    }
+    pubImgProjected.publish(cv_ptr->toImageMsg());
+
+    // visualizeAssociatedPoints(depths, localCloud);
+
+    /* DEBUG */
+    ROS_WARN("Associate point feature time: %fms\n", tictoc.toc());
+    printf("PointFeature size: %d\n", (int)iterCandidate.size());
+    printf("AssociatedFeature size: %d\n", count);
+}
+
+void FeatureManager::visualizeAssociatedPoints(const sensor_msgs::ChannelFloat32 depths, const pcl::PointCloud<PointType>::Ptr localCloud)
+{
+    // pop old images
+    cv_bridge::CvImagePtr cv_ptr;
+    bool isFound = false;
+    {
+        lock_guard<mutex> lock4(imgLock);
+        
+        while (!imgQueue.empty())
+        {
+            if (imgQueue.front().first < timeImageCur)
+            {
+                imgQueue.pop_front();
+            }
+            else if (imgQueue.front().first == timeImageCur)
+            {
+                // cv::Mat grayImage = imgQueue.front().second;
+                // cvtColor(grayImage, thisImage, CV_GRAY2RGB);
+                sensor_msgs::Image thisImage = imgQueue.front().second;
+                cv_ptr = cv_bridge::toCvCopy(thisImage, sensor_msgs::image_encodings::BGRA8);
+                imgQueue.pop_front();
+                isFound = true;
+                printf("Found the image\n");
+                break;
+            }
+        }
+    }
+
+    if (isFound)
+    {
+        // // project 3d to image plane
+        // for (auto& point : localCloud->points)
+        // {
+        //     if (point.z > 0)
+        //     {
+        //         Vector3d spacePoint(point.x, point.y, point.z);
+        //         float maxVal = 20.0;
+        //         int red = min(255, (int)(255 * abs((point.z - maxVal) / maxVal)));
+        //         int green = min(255, (int)(255 * (1 - abs((point.z - maxVal) / maxVal ))));
+        //         Vector2d imagePoint;
+        //         m_camera[0]->spaceToPlane(spacePoint, imagePoint);
+        //         if (imagePoint.x() >= 0 && imagePoint.x() < m_camera[0]->imageWidth() && imagePoint.y() >=0 && imagePoint.y() < m_camera[0]->imageHeight())
+        //         {
+        //             // printf("3d: %f, %f, %f\n", point.x, point.y, point.z);
+        //             // printf("uv: %f, %f\n", imagePoint.x(), imagePoint.y());
+        //             // printf("red: %d, green %d\n", red, green);
+        //             cv::Point2f uv(imagePoint.x(), imagePoint.y());
+        //             cv::circle(cv_ptr->image, uv, 0.5, cv::Scalar(0, green, red), -1);
+        //         }
+        //     }
+        // }
+
+        for (int i = 0; i < pointFeature.points.size(); ++i)
+        {
+            cv::Point2f uv(pointFeature.channels[4].values[i], pointFeature.channels[5].values[i]);
+            if (depths.values[i] >= 0)
+            {
+                cv::circle(cv_ptr->image, uv, 3, cv::Scalar(0, 255, 0), -1);
+            }
+            else
+            {
+                cv::circle(cv_ptr->image, uv, 3, cv::Scalar(0, 0, 255), -1);
+            }
+        }
+        pubImgProjected.publish(cv_ptr->toImageMsg());
+    }
+}
+
+
+
+// int main(int argc, char** argv)
+// {
+//     ros::init(argc, argv, "sensor_fusion");
+
+//     FeatureManager FE;
+
+//     std::thread processThread(&FeatureManager::processFeature, &FE);
+
+//     signal(SIGINT, signal_handle::signal_callback_handler);
+
+//     ROS_INFO("\033[1;32m----> Feature Manager Started.\033[0m");
+
+//     ros::MultiThreadedSpinner spinner(3);
+//     spinner.spin();
+
+//     processThread.join();
+
+//     return 0;
+// }

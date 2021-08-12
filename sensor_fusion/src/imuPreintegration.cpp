@@ -295,8 +295,14 @@ public:
         float r_z = odomMsg->pose.pose.orientation.z;
         float r_w = odomMsg->pose.pose.orientation.w;
         bool degenerate = (int)odomMsg->pose.covariance[0] == 1 ? true : false;
+
+        // DEBUG
+        tf::Quaternion orientation;
+        tf::quaternionMsgToTF(odomMsg->pose.pose.orientation, orientation);    
+        double roll, pitch, yaw;
+        tf::Matrix3x3(orientation).getRPY(roll, pitch, yaw);
         printf("<<<<Imu Preint >>>>\n");
-        printf("Lidar Pose: %f, %f, %f,,,,, %f, %f, %f, %f,\n", p_x, p_y, p_z, r_x, r_y, r_z, r_w);
+        printf("Lidar Pose: %f, %f, %f; %f, %f, %f\n", p_x, p_y, p_z, roll, pitch, yaw);
         gtsam::Pose3 lidarPose = gtsam::Pose3(gtsam::Rot3::Quaternion(r_w, r_x, r_y, r_z), gtsam::Point3(p_x, p_y, p_z));
 
         // 0. initialize system
@@ -331,6 +337,13 @@ public:
             graphValues.insert(X(0), prevPose_);
             graphValues.insert(V(0), prevVel_);
             graphValues.insert(B(0), prevBias_);
+            printf("prevBias: %f, %f, %f, %f, %f, %f\n", 
+                    prevBias_.accelerometer().x(), 
+                    prevBias_.accelerometer().y(),
+                    prevBias_.accelerometer().z(),
+                    prevBias_.gyroscope().x(),
+                    prevBias_.gyroscope().y(),
+                    prevBias_.gyroscope().z());
             // optimize once
             optimizer.update(graphFactors, graphValues);
             graphFactors.resize(0);
@@ -341,7 +354,7 @@ public:
             
             key = 1;
             systemInitialized = true;
-            ROS_WARN("imuPre: systemInitialized\n");
+            printf("imuPre: systemInitialized\n");
             return;
         }
 
@@ -396,7 +409,7 @@ public:
             else
                 break;
         }
-        ROS_WARN("imuPre: Optimize\n");
+        printf("imuPre: Optimize\n");
         // add imu factor to graph
         const gtsam::PreintegratedImuMeasurements& preint_imu = dynamic_cast<const gtsam::PreintegratedImuMeasurements&>(*imuIntegratorOpt_);
         gtsam::ImuFactor imu_factor(X(key - 1), V(key - 1), X(key), V(key), B(key - 1), preint_imu);
@@ -414,6 +427,15 @@ public:
         graphValues.insert(X(key), propState_.pose());
         graphValues.insert(V(key), propState_.v());
         graphValues.insert(B(key), prevBias_);
+
+        printf("prevBias: %f, %f, %f, %f, %f, %f\n", 
+                prevBias_.accelerometer().x(), 
+                prevBias_.accelerometer().y(),
+                prevBias_.accelerometer().z(),
+                prevBias_.gyroscope().x(),
+                prevBias_.gyroscope().y(),
+                prevBias_.gyroscope().z());
+
         // optimize
         optimizer.update(graphFactors, graphValues);
         optimizer.update();
@@ -421,6 +443,8 @@ public:
         graphValues.clear();
         // Overwrite the beginning of the preintegration for the next step.
         gtsam::Values result = optimizer.calculateEstimate();
+        // printf("*******IMU***********\n");
+        // result.print("Currnet estimate: ");
         prevPose_  = result.at<gtsam::Pose3>(X(key));
         prevVel_   = result.at<gtsam::Vector3>(V(key));
         prevState_ = gtsam::NavState(prevPose_, prevVel_);
@@ -465,7 +489,7 @@ public:
         }
 
         ++key;
-        ROS_WARN("imuPre: doneFirstOptimization\n");
+        printf("imuPre: doneFirstOptimization\n");
         doneFirstOpt = true;
     }
 
@@ -521,6 +545,11 @@ public:
                                                 gtsam::Vector3(thisImu.angular_velocity.x,    thisImu.angular_velocity.y,    thisImu.angular_velocity.z), dt);
 
         // predict odometry
+        gtsam::Pose3 prevPose = gtsam::Pose3(prevStateOdom.quaternion(), prevStateOdom.position());
+          printf("prevPose: %f, %f, %f; %f, %f, %f\n", 
+        prevPose.translation().x(), prevPose.translation().y(), prevPose.translation().z(),
+        prevPose.rotation().roll(), prevPose.rotation().pitch(), prevPose.rotation().yaw());
+
         gtsam::NavState currentState = imuIntegratorImu_->predict(prevStateOdom, prevBiasOdom); 
         //prevStateOdom은 lidarPose + imuFactor + biasFactor 등을 통해 optimized된 odom
         //prevBiasOdom: imu bias factor
@@ -535,9 +564,9 @@ public:
 
         // transform imu pose to ldiar
         gtsam::Pose3 imuPose = gtsam::Pose3(currentState.quaternion(), currentState.position());
-        printf("imuHandler -- imuPose: %f, %f, %f, imuOri: %f, %f, %f, %f\n", 
+        printf("imuPose: %f, %f, %f; %f, %f, %f\n", 
         imuPose.translation().x(), imuPose.translation().y(), imuPose.translation().z(),
-        imuPose.rotation().toQuaternion().x(), imuPose.rotation().toQuaternion().y(), imuPose.rotation().toQuaternion().z(), imuPose.rotation().toQuaternion().w());
+        imuPose.rotation().roll(), imuPose.rotation().pitch(), imuPose.rotation().yaw());
         //imuPose 자체는 imu 값을 lidar 기준으로 Rotation만 시켜서 얻은 pose이기 때문에 translation (imu2Lidar)을 곱해줘야 함
         gtsam::Pose3 lidarPose = imuPose.compose(imu2Lidar); 
 
@@ -549,9 +578,10 @@ public:
         odometry.pose.pose.orientation.z = lidarPose.rotation().toQuaternion().z();
         odometry.pose.pose.orientation.w = lidarPose.rotation().toQuaternion().w();
         
-        printf("imuHandler -- lidarPose: %f, %f, %f, imuOri: %f, %f, %f, %f\n", 
+        // predict odometry
+        printf("lidarPose: %f, %f, %f; %f, %f, %f\n", 
         lidarPose.translation().x(), lidarPose.translation().y(), lidarPose.translation().z(),
-        lidarPose.rotation().toQuaternion().x(), lidarPose.rotation().toQuaternion().y(), lidarPose.rotation().toQuaternion().z(), lidarPose.rotation().toQuaternion().w());
+        lidarPose.rotation().roll(), lidarPose.rotation().pitch(), lidarPose.rotation().yaw());
 
         odometry.twist.twist.linear.x = currentState.velocity().x();
         odometry.twist.twist.linear.y = currentState.velocity().y();
@@ -560,7 +590,7 @@ public:
         odometry.twist.twist.angular.y = thisImu.angular_velocity.y + prevBiasOdom.gyroscope().y();
         odometry.twist.twist.angular.z = thisImu.angular_velocity.z + prevBiasOdom.gyroscope().z();
         pubImuOdometry.publish(odometry); //map-optimized된 lidar odometry(prevStateOdom) + imu_integration한 odometry = CurrentState
-        ROS_WARN("imuPre: publish odometry_incremental\n");
+        printf("imuPre: publish odometry_incremental\n");
 
         // Topic "imu_incremental"
     }

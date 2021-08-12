@@ -246,7 +246,10 @@ class ParamServer
 	    float surroundingkeyframeAddingDistThreshold; 
 	    float surroundingkeyframeAddingAngleThreshold; 
 	    float surroundingKeyframeDensity;
-	    float surroundingKeyframeSearchRadius;
+	    float surroundingKeyframeSearchRadiusLarge;
+		float surroundingKeyframeSearchRadiusSmall;
+	    float surroundingKeyframeStackingThreshold;
+
 	    
 	    // Loop closure
 	    bool  loopClosureEnableFlag;
@@ -418,7 +421,9 @@ class ParamServer
 	        nh.param<float>("fusion/laser/surroundingkeyframeAddingDistThreshold", surroundingkeyframeAddingDistThreshold, 1.0);
 	        nh.param<float>("fusion/laser/surroundingkeyframeAddingAngleThreshold", surroundingkeyframeAddingAngleThreshold, 0.2);
 	        nh.param<float>("fusion/laser/surroundingKeyframeDensity", surroundingKeyframeDensity, 1.0);
-	        nh.param<float>("fusion/laser/surroundingKeyframeSearchRadius", surroundingKeyframeSearchRadius, 50.0);
+	        nh.param<float>("fusion/laser/surroundingKeyframeSearchRadiusLarge", surroundingKeyframeSearchRadiusLarge, 50.0);
+	        nh.param<float>("fusion/laser/surroundingKeyframeSearchRadiusSmall", surroundingKeyframeSearchRadiusSmall, 30.0);
+	        nh.param<float>("fusion/laser/surroundingKeyframeStackingThreshold", surroundingKeyframeStackingThreshold, 50.0);
 
 	        nh.param<bool>("fusion/laser/loopClosureEnableFlag", loopClosureEnableFlag, false);
 	        nh.param<float>("fusion/laser/loopClosureFrequency", loopClosureFrequency, 1.0);
@@ -519,6 +524,27 @@ class ParamServer
 
             return imu_out;
         }
+
+		pcl::PointCloud<PointType>::Ptr transformPointCloud(pcl::PointCloud<PointType>::Ptr cloudIn, PointTypePose* transformIn)
+		{
+			pcl::PointCloud<PointType>::Ptr cloudOut(new pcl::PointCloud<PointType>());
+
+			int cloudSize = cloudIn->size();
+			cloudOut->resize(cloudSize);
+
+			Eigen::Affine3f transCur = pcl::getTransformation(transformIn->x, transformIn->y, transformIn->z, transformIn->roll, transformIn->pitch, transformIn->yaw);
+			
+			#pragma omp parallel for num_threads(numberOfCores)
+			for (int i = 0; i < cloudSize; ++i)
+			{
+				const auto &pointFrom = cloudIn->points[i];
+				cloudOut->points[i].x = transCur(0,0) * pointFrom.x + transCur(0,1) * pointFrom.y + transCur(0,2) * pointFrom.z + transCur(0,3);
+				cloudOut->points[i].y = transCur(1,0) * pointFrom.x + transCur(1,1) * pointFrom.y + transCur(1,2) * pointFrom.z + transCur(1,3);
+				cloudOut->points[i].z = transCur(2,0) * pointFrom.x + transCur(2,1) * pointFrom.y + transCur(2,2) * pointFrom.z + transCur(2,3);
+				cloudOut->points[i].intensity = pointFrom.intensity;
+			}
+			return cloudOut;
+		}
 };
 
 sensor_msgs::PointCloud2 publishCloud(ros::Publisher *thisPub, pcl::PointCloud<PointType>::Ptr thisCloud, ros::Time thisStamp, std::string thisFrame)
@@ -569,6 +595,13 @@ void imuRPY2rosRPY(sensor_msgs::Imu *thisImuMsg, T *rosRoll, T *rosPitch, T *ros
     *rosYaw = imuYaw;
 }
 
+PointTypePose trans2PointTypePose(Eigen::Affine3f transformIn)
+{
+	PointTypePose thisPose6D;
+	pcl::getTranslationAndEulerAngles(transformIn, thisPose6D.x, thisPose6D.y, thisPose6D.z,
+												   thisPose6D.roll, thisPose6D.pitch, thisPose6D.yaw);
+	return thisPose6D;
+}
 
 float pointDistance(PointType p)
 {

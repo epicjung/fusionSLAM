@@ -1,6 +1,5 @@
 # Cloud Info
 Header header 
-bool isCloud
 
 int32[] startRingIndex
 int32[] endRingIndex
@@ -24,16 +23,10 @@ float32 initialGuessRoll
 float32 initialGuessPitch
 float32 initialGuessYaw
 
-# Initial guess of the last point
-float32 initialGuessEndX
-float32 initialGuessEndY
-float32 initialGuessEndZ
-float32 initialGuessEndRoll
-float32 initialGuessEndPitch
-float32 initialGuessEndYaw
-
 # Point cloud messages
 sensor_msgs/PointCloud2 cloud_deskewed  # original cloud deskewed
 sensor_msgs/PointCloud2 cloud_corner    # extracted corner feature
 sensor_msgs/PointCloud2 cloud_surface   # extracted surface feature
-sensor_msgs/PointCloud point_feature # extracted point feature from image
+
+# Visual feature messages
+sensor_msgs/PointCloud point_feature    # extracted point feature from image

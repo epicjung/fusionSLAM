@@ -2,11 +2,17 @@
 
     <arg name="project" default="sensor_fusion"/>
     
-    <node pkg="$(arg project)" type="$(arg project)_imuPreintegration"   name="$(arg project)_imuPreintegration"    output="screen" 	respawn="true"/>
+    <!-- <node pkg="$(arg project)" type="$(arg project)_imuPreintegration"   name="$(arg project)_imuPreintegration"    output="screen" 	respawn="true"/> -->
+    <node pkg="$(arg project)" type="$(arg project)_imuPreintegration"   name="$(arg project)_imuPreintegration"                     	respawn="true"/>
+    <!-- <node pkg="$(arg project)" type="$(arg project)_imageProjection"     name="$(arg project)_imageProjection"           respawn="true"/> -->
     <node pkg="$(arg project)" type="$(arg project)_imageProjection"     name="$(arg project)_imageProjection"      output="screen"     respawn="true"/>
     <node pkg="$(arg project)" type="$(arg project)_featureExtraction"   name="$(arg project)_featureExtraction"    output="screen"     respawn="true"/>
     <!-- <node pkg="$(arg project)" type="$(arg project)_mapOptmization"      name="$(arg project)_mapOptmization"       output="screen"     respawn="true"/> -->
-    <node pkg="$(arg project)" type="$(arg project)_optimization"        name="$(arg project)_optimization"       output="screen"     respawn="true" />
+    <node pkg="$(arg project)" type="$(arg project)_optimization"        name="$(arg project)_optimization"         output="screen"      respawn="true"/>
+    <!-- <node pkg="$(arg project)" type="$(arg project)_optimization"        name="$(arg project)_optimization"                respawn="true" /> -->
+
     <node pkg="$(arg project)" type="$(arg project)_visualFeature"       name="$(arg project)_visualFeature"        output="screen"     respawn="true"/>
+    <!-- <node pkg="$(arg project)" type="$(arg project)_featureManager"      name="$(arg project)_featureManager"           respawn="true"/> -->
+        <!-- <node pkg="$(arg project)" type="$(arg project)_featureManager"      name="$(arg project)_featureManager"       output="screen"     respawn="true"/> -->
 
 </launch>
