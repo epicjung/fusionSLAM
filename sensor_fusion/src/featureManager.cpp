@@ -73,24 +73,41 @@ void FeatureManager::inputPointFeature(const sensor_msgs::PointCloud pointIn)
         return;
     }
 
-    if (!pointInfo.odomAvailable)
-    {
-        ROS_WARN("PointHandler: odom not available");
-        return;
-    }
-
     if (addPointFeature())
     {
+        printf("addPointFeautre: imu - %d, odom - %d\n", imuAvailable, odomAvailable);
+
         associatePointFeature();
+
+        addKeyframe();
+        
         frameCount++;
-    } else {
+    } 
+    else 
+    {
+        printf("addPointFeautre: fail\n");
         frameCount++;
         return;
     }
     ROS_WARN("FM: frameCount: %d\n", frameCount);
     ROS_WARN("Manage point time: %fms\n", tictoc.toc());
-    pointInfo.header = pointIn.header;
-    pointInfo.point_feature = pointFeature;
+}
+
+void FeatureManager::addKeyframe()
+{
+    keyframeCount = frameCount;
+
+    for (auto &it : pointFeaturesPerId)
+    {
+        if (keyframeCount - it.startFrame < (int)it.featurePerFrame.size())
+        {
+            printf("Key %d: StartFrame: %d, keyFrame: %d, frame: %d, fpf size: %d\n", it.featureId, it.startFrame, keyframeCount, frameCount, (int)it.featurePerFrame.size());
+            sensor_fusion::cloud_info pointInfo = it.featurePerFrame.at(keyframeCount - it.startFrame);
+            featLock.lock();
+            featureQueue.push_back(make_pair(pointInfo.featureId, pointInfo));
+            featLock.unlock();
+        }
+    }
 }
     
 void FeatureManager::inputCloudInfo(const sensor_fusion::cloud_info cloudInfoIn)
@@ -99,17 +116,12 @@ void FeatureManager::inputCloudInfo(const sensor_fusion::cloud_info cloudInfoIn)
 
     timeCloudInfoCur = ROS_TIME(&cloudInfoIn);
     
-    printf("CloudInfoHandler: %f\n", timeCloudInfoCur);
-
     manageCloudFeature();
 
-    printf("Timesent: %f; cloud time: %f \n", timeSent, timeCloudInfoCur);
     // TO-DO: Feature extraction and publish
     featLock.lock();
-    featureQueue.push_back(cloudInfo);
+    featureQueue.push_back(make_pair(-1, cloudInfo)); // id = -1 for cloudInfo
     featLock.unlock();
-
-    timeSent = timeCloudInfoCur;
 }
 
 void FeatureManager::inputOdom(const nav_msgs::Odometry odomIn)
@@ -132,7 +144,9 @@ void FeatureManager::removeOldFeatures(double refTime)
 
         int lastIdx = it->endFrame() - it->startFrame;
 
-        if (it->featurePerFrame.at(lastIdx).timestamp < refTime)
+        // printf("id: %d, startFrame: %d, size: %d, lastIdx: %d\n", it->featureId, it->startFrame, (int)it->featurePerFrame.size(), lastIdx);
+
+        if (it->featurePerFrame.at(lastIdx).header.stamp.toSec() < refTime)
         {
             pointLock.lock();
             pointFeaturesPerId.erase(it);
@@ -140,15 +154,17 @@ void FeatureManager::removeOldFeatures(double refTime)
         }
     }
 
-    while(!pointQueue.empty())
+    while(!featureQueue.empty())
     {
-        FeaturePerFrame fpf = pointQueue.front().second;
-        if (fpf.timestamp < refTime)
+        sensor_fusion::cloud_info pointInfo = featureQueue.front().second;
+        if (pointInfo.header.stamp.toSec() < refTime)
         {
-            pointLock.lock();
-            pointQueue.pop_front();
-            pointLock.unlock();
+            featLock.lock();
+            featureQueue.pop_front();
+            featLock.unlock();
         }
+        else
+            break;
     }
 }
 
@@ -162,26 +178,32 @@ bool FeatureManager::addPointFeature() // check keyframe and add if it is a keyf
     int longTrackNum = 0;
     bool isKey = false;
 
-    for (int i = 0; i < pointFeature.points.size(); ++i)
+    for (int i = 0; i < (int)pointFeature.points.size(); ++i)
     {
-        Eigen::Matrix<float, 6, 1> feature;
-        Eigen::Matrix<float, 6, 1> initPose;
         int featureId = (int) pointFeature.channels[0].values[i];
-        feature(0)  = pointFeature.points[i].x;
-        feature(1)  = pointFeature.points[i].y;
-        feature(2)  = pointFeature.channels[4].values[i];
-        feature(3)  = pointFeature.channels[5].values[i];
-        feature(4)  = pointFeature.channels[6].values[i];
-        feature(5)  = pointFeature.channels[7].values[i];
-        initPose(0) = pointInfo.initialGuessX;
-        initPose(1) = pointInfo.initialGuessY;
-        initPose(2) = pointInfo.initialGuessZ;
-        initPose(3) = pointInfo.initialGuessRoll;
-        initPose(4) = pointInfo.initialGuessPitch;
-        initPose(5) = pointInfo.initialGuessYaw;
-        
-        FeaturePerFrame fpf(feature, initPose, timeImageCur);
-        
+
+        sensor_fusion::cloud_info pointInfo;
+        pointInfo.header.stamp = ros::Time().fromSec(timeImageCur);
+        pointInfo.header.frame_id = camFrame;
+        pointInfo.initialGuessX = latestX;
+        pointInfo.initialGuessY = latestY;
+        pointInfo.initialGuessZ = latestZ;
+        pointInfo.initialGuessRoll = latestRoll;
+        pointInfo.initialGuessPitch = latestPitch;
+        pointInfo.initialGuessYaw = latestYaw;
+        pointInfo.imuRollInit = latestImuRoll;
+        pointInfo.imuPitchInit = latestImuPitch;
+        pointInfo.imuYawInit = latestImuYaw;
+        pointInfo.odomAvailable = odomAvailable;
+        pointInfo.imuAvailable = imuAvailable;
+        pointInfo.point2d.x = pointFeature.points[i].x;
+        pointInfo.point2d.y = pointFeature.points[i].y;
+        pointInfo.point2d.z = pointFeature.points[i].z;
+        pointInfo.uv.x = pointFeature.channels[4].values[i];
+        pointInfo.uv.y = pointFeature.channels[5].values[i];
+        pointInfo.featureId = featureId;
+        pointInfo.estimatedDepth = -1.0;
+
         auto it = find_if(pointFeaturesPerId.begin(), pointFeaturesPerId.end(), [featureId](const FeaturePerId &it)
                     {
                         return it.featureId == featureId;
@@ -189,12 +211,12 @@ bool FeatureManager::addPointFeature() // check keyframe and add if it is a keyf
         if (it == pointFeaturesPerId.end())
         {
             pointFeaturesPerId.push_back(FeaturePerId(featureId, frameCount, timeImageCur));
-            pointFeaturesPerId.back().featurePerFrame.push_back(fpf);
+            pointFeaturesPerId.back().featurePerFrame.push_back(pointInfo);
             newFeatureNum++;
         }
         else if (it->featureId == featureId)
         {
-            it->featurePerFrame.push_back(fpf);
+            it->featurePerFrame.push_back(pointInfo);
             lastTrackNum++;
             if (it->featurePerFrame.size() >= 4)
                 longTrackNum++;
@@ -204,9 +226,11 @@ bool FeatureManager::addPointFeature() // check keyframe and add if it is a keyf
     // lastTrackNum: # of features that have already existed previously --> smaller means there are more fresh features = keyframe
     // longTrackNum: # of features that have existed for more than 4 frames --> smaller means there are more fresh features = keyframe
     // newFeatureNum > 0.5 * lastTrackNum: more fresh feature are there than 0.5 * those have been tracked before  
-    // printf("key: %d, frame: %d, lastTrackNum: %d, longTrackNum: %d, newFeatureNum: %d\n", keyframeCount, frameCount, lastTrackNum, longTrackNum, newFeatureNum);
-    if (frameCount < 2 || lastTrackNum < 20 || longTrackNum < 40 || newFeatureNum > 0.5 * lastTrackNum)    
+    printf("key: %d, frame: %d, lastTrackNum: %d, longTrackNum: %d, newFeatureNum: %d\n", keyframeCount, frameCount, lastTrackNum, longTrackNum, newFeatureNum);
+    if (frameCount < 2 || lastTrackNum < 20 || longTrackNum < 40 || newFeatureNum > 0.5 * lastTrackNum)  
+    {
         isKey = true;
+    }
     else
     {
         for (auto &it : pointFeaturesPerId)
@@ -229,20 +253,6 @@ bool FeatureManager::addPointFeature() // check keyframe and add if it is a keyf
         }
     }
 
-    if (isKey)
-    {
-        keyframeCount = frameCount;
-        for (auto &it : pointFeaturesPerId)
-        {
-            if (keyframeCount - it.startFrame < (int)it.featurePerFrame.size())
-            {
-                printf("Key %d: StartFrame: %d, keyFrame: %d, frame: %d, fpf size: %d\n", it.featureId, it.startFrame, keyframeCount, frameCount, (int)it.featurePerFrame.size());
-                pointLock.lock();
-                pointQueue.push_back(make_pair(it.featureId, it.featurePerFrame.at(keyframeCount - it.startFrame)));
-                pointLock.unlock();
-            }
-        }
-    }
     ROS_WARN("Add point feature time: %fms\n", tictoc.toc());
 
     return isKey;
@@ -254,16 +264,16 @@ float FeatureManager::compensatedParallax2(const FeaturePerId &it)
 
     //check the second last frame is keyframe or not
     //parallax betwwen seconde last frame and third last frame
-    const FeaturePerFrame &frame_i = it.featurePerFrame[keyframeCount - 1 - it.startFrame];
-    const FeaturePerFrame &frame_j = it.featurePerFrame[frameCount - it.startFrame];
+    const sensor_fusion::cloud_info &frame_i = it.featurePerFrame[keyframeCount - 1 - it.startFrame];
+    const sensor_fusion::cloud_info &frame_j = it.featurePerFrame[frameCount - it.startFrame];
 
     float ans = 0;
-    Vector3f p_j = frame_j.point;
+    Vector3f p_j(frame_j.point2d.x, frame_j.point2d.y, frame_j.point2d.z);
 
     float u_j = p_j(0);
     float v_j = p_j(1);
 
-    Vector3f p_i = frame_i.point;
+    Vector3f p_i(frame_i.point2d.x, frame_i.point2d.y, frame_i.point2d.z);
     Vector3f p_i_comp;
 
     //int r_i = frame_count - 2;
@@ -289,7 +299,7 @@ float FeatureManager::compensatedParallax2(const FeaturePerId &it)
 void FeatureManager::updateImuRPY()
 {
     // use imu orientation
-    pointInfo.imuAvailable = false;
+    imuAvailable = false;
 
     while (!imuQueue.empty())
     {
@@ -307,29 +317,29 @@ void FeatureManager::updateImuRPY()
         sensor_msgs::Imu thisImu = imuQueue[i];
         double timeImuCur = ROS_TIME(&thisImu);
         if (timeImuCur <= timeImageCur)
-            imuRPY2rosRPY(&thisImu, &pointInfo.imuRollInit, &pointInfo.imuPitchInit, &pointInfo.imuYawInit);
+            imuRPY2rosRPY(&thisImu, &latestImuRoll, &latestImuPitch, &latestImuYaw);
         
         if (timeImuCur > timeImageCur)
         {
-            pointInfo.imuAvailable = true;
+            imuAvailable = true;
             break;
         }
     }
 
-    if (pointInfo.imuAvailable)
+    if (imuAvailable)
     {
-        Eigen::Affine3f imuInitRPY = pcl::getTransformation(0.0, 0.0, 0.0, pointInfo.imuRollInit, pointInfo.imuPitchInit, pointInfo.imuYawInit);
+        Eigen::Affine3f imuInitRPY = pcl::getTransformation(0.0, 0.0, 0.0, latestImuRoll, latestImuPitch, latestImuYaw);
         float x, y, z, roll, pitch, yaw;
         pcl::getTranslationAndEulerAngles(affineL2C, x, y, z, roll, pitch, yaw);
         Eigen::Affine3f transformIncre = pcl::getTransformation(0.0, 0.0, 0.0, roll, pitch, yaw);
         Eigen::Affine3f camInitRPY = imuInitRPY * transformIncre;
-        pcl::getTranslationAndEulerAngles(camInitRPY, x, y, z, pointInfo.imuRollInit, pointInfo.imuPitchInit, pointInfo.imuYawInit);
+        pcl::getTranslationAndEulerAngles(camInitRPY, x, y, z, latestImuRoll, latestImuPitch,  latestImuYaw);
     }
 }
 
 void FeatureManager::updateOdometry()
 {
-    pointInfo.odomAvailable = false;
+    odomAvailable = false;
 
         // get odometry 
     while (!odomQueue.empty())
@@ -354,12 +364,12 @@ void FeatureManager::updateOdometry()
         {
             continue;
         } else {
-            pointInfo.odomAvailable = true;
+            odomAvailable = true;
             break;
         }
     }
 
-    if (pointInfo.odomAvailable)
+    if (odomAvailable)
     {
         tf::Quaternion orientation;
         tf::quaternionMsgToTF(startOdomMsg.pose.pose.orientation, orientation);
@@ -370,8 +380,7 @@ void FeatureManager::updateOdometry()
 
         transWorld2Cam = pcl::getTransformation(startOdomMsg.pose.pose.position.x, startOdomMsg.pose.pose.position.y, startOdomMsg.pose.pose.position.z,
                                             (float) roll, (float) pitch, (float) yaw) * affineL2C;
-        pcl::getTranslationAndEulerAngles(transWorld2Cam, pointInfo.initialGuessX, pointInfo.initialGuessY, pointInfo.initialGuessZ,
-                                                            pointInfo.initialGuessRoll, pointInfo.initialGuessPitch, pointInfo.initialGuessYaw);
+        pcl::getTranslationAndEulerAngles(transWorld2Cam, latestX, latestY, latestZ, latestRoll, latestPitch, latestYaw);
     }
 }
 
@@ -426,6 +435,8 @@ void FeatureManager::manageCloudFeature()
 
 void FeatureManager::associatePointFeature()
 {
+    if (!odomAvailable)
+        return;
     TicToc tictoc;
 
     lock_guard<mutex> lock(lidarLock);
@@ -558,7 +569,9 @@ void FeatureManager::associatePointFeature()
 
         if ((int) it.featurePerFrame.size() >= 2 && lastIndex == keyframeCount)
         {            
-            Eigen::Vector3f thisFeature = it.featurePerFrame.back().point;
+            Eigen::Vector3f thisFeature(it.featurePerFrame.back().point2d.x, 
+                                        it.featurePerFrame.back().point2d.y, 
+                                        it.featurePerFrame.back().point2d.z);
             thisFeature.normalize();
             PointType p;
             p.x = thisFeature(0);
@@ -569,12 +582,12 @@ void FeatureManager::associatePointFeature()
             pointSphere->push_back(p);
             if (!it.isDepth)
             {
-                cv::Point2f uv(it.featurePerFrame.back().uv.x(), it.featurePerFrame.back().uv.y());
+                cv::Point2f uv(it.featurePerFrame.back().uv.x, it.featurePerFrame.back().uv.y);
                 cv::circle(cv_ptr->image, uv, 3, cv::Scalar(0, 0, 255), -1);
             }
             else
             {
-                cv::Point2f uv(it.featurePerFrame.back().uv.x(), it.featurePerFrame.back().uv.y());
+                cv::Point2f uv(it.featurePerFrame.back().uv.x, it.featurePerFrame.back().uv.y);
                 cv::circle(cv_ptr->image, uv, 3, cv::Scalar(0, 255, 255), -1);
             }
         }
@@ -657,9 +670,9 @@ void FeatureManager::associatePointFeature()
             if (pointSphere->points[i].intensity > lidarMinRange && pointSphere->points[i].intensity < lidarMaxRange)
             {
                 iterCandidate[i]->featurePerFrame.back().estimatedDepth = pointSphere->points[i].intensity;
-                iterCandidate[i]->featurePerFrame.back().point3d.x() = pointSphere->points[i].x;
-                iterCandidate[i]->featurePerFrame.back().point3d.y() = pointSphere->points[i].y;
-                iterCandidate[i]->featurePerFrame.back().point3d.z() = pointSphere->points[i].z;
+                iterCandidate[i]->featurePerFrame.back().point3d.x = pointSphere->points[i].x;
+                iterCandidate[i]->featurePerFrame.back().point3d.y = pointSphere->points[i].y;
+                iterCandidate[i]->featurePerFrame.back().point3d.z = pointSphere->points[i].z;
                 printf("id: %d, cur: %d, keyframe: %d, depth: %f\n", iterCandidate[i]->featureId, iterCandidate[i]->featurePerFrame.size()-1, keyframeCount, iterCandidate[i]->featurePerFrame.back().estimatedDepth);
                 // depths.values[i] = pointSphere->points[i].intensity;
                 if (iterCandidate[i]->isDepth == false)
@@ -673,7 +686,7 @@ void FeatureManager::associatePointFeature()
                 //         iterCandidate[i]->featurePerFrame.back().uv.x(), 
                 //         iterCandidate[i]->featurePerFrame.back().uv.y());
 
-                cv::Point2f uv(iterCandidate[i]->featurePerFrame.back().uv.x(), iterCandidate[i]->featurePerFrame.back().uv.y());
+                cv::Point2f uv(iterCandidate[i]->featurePerFrame.back().uv.x, iterCandidate[i]->featurePerFrame.back().uv.y);
                 cv::circle(cv_ptr->image, uv, 3, cv::Scalar(0, 255, 0), -1);
             
                 count++;

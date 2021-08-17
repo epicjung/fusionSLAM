@@ -244,7 +244,7 @@ public:
 
         priorPoseNoise  = gtsam::noiseModel::Diagonal::Sigmas((gtsam::Vector(6) << 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2).finished()); // rad,rad,rad,m, m, m
         priorVelNoise   = gtsam::noiseModel::Isotropic::Sigma(3, 1e4); // m/s
-        priorBiasNoise  = gtsam::noiseModel::Isotropic::Sigma(6, 1e-3); // 1e-2 ~ 1e-3 seems to be good
+        priorBiasNoise  = gtsam::noiseModel::Isotropic::Sigma(6, 1e-2); // 1e-2 ~ 1e-3 seems to be good
         correctionNoise = gtsam::noiseModel::Diagonal::Sigmas((gtsam::Vector(6) << 0.05, 0.05, 0.05, 0.1, 0.1, 0.1).finished()); // rad,rad,rad,m, m, m
         correctionNoise2 = gtsam::noiseModel::Diagonal::Sigmas((gtsam::Vector(6) << 1, 1, 1, 1, 1, 1).finished()); // rad,rad,rad,m, m, m
         noiseModelBetweenBias = (gtsam::Vector(6) << imuAccBiasN, imuAccBiasN, imuAccBiasN, imuGyrBiasN, imuGyrBiasN, imuGyrBiasN).finished();
@@ -304,7 +304,7 @@ public:
         printf("<<<<Imu Preint >>>>\n");
         printf("Lidar Pose: %f, %f, %f; %f, %f, %f\n", p_x, p_y, p_z, roll, pitch, yaw);
         gtsam::Pose3 lidarPose = gtsam::Pose3(gtsam::Rot3::Quaternion(r_w, r_x, r_y, r_z), gtsam::Point3(p_x, p_y, p_z));
-
+        printf("imuQueOpt size: %d\n", (int)imuQueOpt.size());
         // 0. initialize system
         if (systemInitialized == false)
         {
@@ -313,6 +313,7 @@ public:
             // pop old IMU message
             while (!imuQueOpt.empty())
             {
+                printf("Init: imuTime: %f, correctionTime: %f\n", ROS_TIME(&imuQueOpt.front()), currentCorrectionTime);
                 if (ROS_TIME(&imuQueOpt.front()) < currentCorrectionTime - delta_t)
                 {
                     lastImuT_opt = ROS_TIME(&imuQueOpt.front());
@@ -323,6 +324,8 @@ public:
             }
             // initial pose
             prevPose_ = lidarPose.compose(lidar2Imu);
+            printf("Init imu pose: %f, %f, %f\n", prevPose_.translation().x(), prevPose_.translation().y(), prevPose_.translation().z());
+
             gtsam::PriorFactor<gtsam::Pose3> priorPose(X(0), prevPose_, priorPoseNoise);
             graphFactors.add(priorPose);
             // initial velocity
@@ -391,25 +394,27 @@ public:
 
 
         // 1. integrate imu data and optimize
+        int imuCount = 0;
         while (!imuQueOpt.empty())
         {
             // pop and integrate imu data that is between two optimizations
             sensor_msgs::Imu *thisImu = &imuQueOpt.front();
             double imuTime = ROS_TIME(thisImu);
+            printf("imuTime: %f, correctionTime: %f\n", imuTime, currentCorrectionTime);
             if (imuTime < currentCorrectionTime - delta_t)
             {
                 double dt = (lastImuT_opt < 0) ? (1.0 / 500.0) : (imuTime - lastImuT_opt);
                 imuIntegratorOpt_->integrateMeasurement(
                         gtsam::Vector3(thisImu->linear_acceleration.x, thisImu->linear_acceleration.y, thisImu->linear_acceleration.z),
                         gtsam::Vector3(thisImu->angular_velocity.x,    thisImu->angular_velocity.y,    thisImu->angular_velocity.z), dt);
-                
+                imuCount++;
                 lastImuT_opt = imuTime;
                 imuQueOpt.pop_front();
             }
             else
                 break;
         }
-        printf("imuPre: Optimize\n");
+        printf("imuPre: Optimize for %d imu measurements\n", imuCount);
         // add imu factor to graph
         const gtsam::PreintegratedImuMeasurements& preint_imu = dynamic_cast<const gtsam::PreintegratedImuMeasurements&>(*imuIntegratorOpt_);
         gtsam::ImuFactor imu_factor(X(key - 1), V(key - 1), X(key), V(key), B(key - 1), preint_imu);
@@ -424,6 +429,8 @@ public:
         graphFactors.add(pose_factor);
         // insert predicted values
         gtsam::NavState propState_ = imuIntegratorOpt_->predict(prevState_, prevBias_);
+        printf("Propstate: %f, %f, %f\n", propState_.pose().translation().x(), propState_.pose().translation().y(), propState_.pose().translation().z());
+        printf("Propstate vel: %f, %f, %f\n", propState_.v().x(), propState_.v().y(), propState_.v().z());
         graphValues.insert(X(key), propState_.pose());
         graphValues.insert(V(key), propState_.v());
         graphValues.insert(B(key), prevBias_);

@@ -29,4 +29,8 @@ sensor_msgs/PointCloud2 cloud_corner    # extracted corner feature
 sensor_msgs/PointCloud2 cloud_surface   # extracted surface feature
 
 # Visual feature messages
-sensor_msgs/PointCloud point_feature    # extracted point feature from image
+int32 featureId
+float32 estimatedDepth
+geometry_msgs/Point32 point2d    
+geometry_msgs/Point32 point3d
+geometry_msgs/Point32 uv

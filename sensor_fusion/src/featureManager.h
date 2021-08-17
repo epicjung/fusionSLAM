@@ -10,47 +10,6 @@
 using namespace std;
 using namespace Eigen;
 
-class FeaturePerFrame
-{
-    public:
-        FeaturePerFrame(const Eigen::Matrix<float, 6, 1> &_point, const Eigen::Matrix<float, 6, 1> &_initial, const double &_timestamp)
-        {
-            // measurements
-            point.x() = _point(0);
-            point.y() = _point(1);
-            point.z() = 1.0;
-            uv.x() = _point(2);
-            uv.y() = _point(3);
-            velocity.x() = _point(4);
-            velocity.y() = _point(5);
-
-            // initial pose
-            initX = _initial(0);
-            initY = _initial(1);
-            initZ = _initial(2);
-            initRoll = _initial(3);
-            initPitch = _initial(4);
-            initYaw = _initial(5);
-
-            // time for frame
-            timestamp = _timestamp;
-            estimatedDepth = -1.0;
-        }
-
-        Vector3f point;
-        Vector2f uv;
-        Vector2f velocity;
-        Vector3f point3d;
-        float initX;
-        float initY;
-        float initZ;
-        float initRoll;
-        float initPitch;
-        float initYaw;
-        float estimatedDepth;
-        double timestamp;
-};
-
 class FeaturePerId
 {
     public:
@@ -63,7 +22,7 @@ class FeaturePerId
         const int featureId;
         double startTime;
         int startFrame;
-        vector<FeaturePerFrame> featurePerFrame;
+        vector<sensor_fusion::cloud_info> featurePerFrame;
         int usedNum;
         int solveFlag;
         bool isDepth;
@@ -101,21 +60,32 @@ private:
     pcl::PointCloud<PointType>::Ptr laserCloudNearby;
 
     // vector<camodocal::CameraPtr> m_camera;
-    double timeImageCur;
     double timeScanStart;
     double timeCloudInfoCur;
     double timeSent;
 
     Eigen::Affine3f transWorld2Cam;
 
+    // feature-related
+    float latestX;
+    float latestY;
+    float latestZ;
+    float latestRoll;
+    float latestPitch;
+    float latestYaw;
+    float latestImuRoll;
+    float latestImuPitch;
+    float latestImuYaw;
+    double timeImageCur;
+    bool odomAvailable;
+    bool imuAvailable;
 
 public: 
 
     int frameCount;
     int keyframeCount;
     list<FeaturePerId> pointFeaturesPerId;
-    deque<pair<int, FeaturePerFrame>> pointQueue;
-    deque<sensor_fusion::cloud_info> featureQueue;
+    deque<pair<int, sensor_fusion::cloud_info>> featureQueue;
 
     FeatureManager();
 
@@ -133,6 +103,8 @@ public:
     void processFeature();
     void managePointFeature();
     void manageCloudFeature();
+    void addKeyframe();
+    void addKeyframe2();
     void associatePointFeature();
     void removeOldFeatures(double timestamp);
     bool addPointFeature();

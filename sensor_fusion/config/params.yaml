@@ -23,7 +23,7 @@ fusion:
     lidarSkip: 2
 
   optimization:
-    timeLag: 3.0
+    timeLag: 50.0
 
   imu:
     # IMU Settings

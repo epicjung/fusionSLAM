@@ -43,7 +43,6 @@ public:
     ISAM2 *isam;
     IncrementalFixedLagSmoother2 *smootherISAM2;
 
-    ros::Subscriber subFeatureInfo;
     ros::Subscriber subPoint;       
     ros::Subscriber subCloudInfo;    
     ros::Subscriber subImage;  
@@ -67,6 +66,7 @@ public:
     map<int, bool> initialized;
     map<int, noiseModel::Gaussian::shared_ptr> marginalCovariances;
     map<Key, double> timestamps;
+    map<int, SmartFactor::shared_ptr> smartPerId;
 
     std::mutex mtx;
     std::mutex featLock;
@@ -79,8 +79,11 @@ public:
     float latestPitch;
     float latestYaw;
 
+    int featureId;
     sensor_fusion::cloud_info cloudInfo;
+    sensor_fusion::cloud_info featureInfo;
     ros::Time cloudInfoTimeIn;
+    ros::Time timeFeatureIn;
 
     bool firstCloud;
 
@@ -93,6 +96,7 @@ public:
 
     pcl::PointCloud<PointTypePose>::Ptr cloudKeyPoses6D;
     pcl::PointCloud<PointType>::Ptr cloudKeyPoses3D;
+    pcl::PointCloud<PointType>::Ptr keyPoses;
 
     pcl::PointCloud<PointType>::Ptr laserCloudDeskewLast;
     pcl::PointCloud<PointType>::Ptr laserCloudCornerLast; // corner feature set from odoOptimization
@@ -137,6 +141,7 @@ public:
 
     FeatureManager fManager;
     double timeLastIn;
+    int numAssociatedPoint;
 
     Optimization()
     {
@@ -159,7 +164,6 @@ public:
         subImu              = nh.subscribe<sensor_msgs::Imu>(imuTopic, 1000, &Optimization::imuHandler, this, ros::TransportHints().tcpNoDelay());
         subOdom             = nh.subscribe<nav_msgs::Odometry>(odomTopic+"_incremental", 1000, &Optimization::odometryHandler, this, ros::TransportHints().tcpNoDelay());
         subCloudInfo        = nh.subscribe<sensor_fusion::cloud_info>("/fusion/feature/cloud_info", 1000, &Optimization::cloudInfoHandler, this, ros::TransportHints().tcpNoDelay());
-        subFeatureInfo      = nh.subscribe<sensor_fusion::cloud_info>("/fusion/feature/feature_info", 1, &Optimization::featureInfoHandler, this, ros::TransportHints().tcpNoDelay()); 
         pubPoint            = nh.advertise<visualization_msgs::MarkerArray>("/fusion/feature/point_landmark", 1);
         pubCloudNearby      = nh.advertise<sensor_msgs::PointCloud2>("/fusion/mapping/cloud_nearby", 1);
         pubTestImage        = nh.advertise<sensor_msgs::Image>("fusion/feature/test_image", 1);
@@ -179,6 +183,7 @@ public:
     {
         cloudKeyPoses6D.reset(new pcl::PointCloud<PointTypePose>());
         cloudKeyPoses3D.reset(new pcl::PointCloud<PointType>());
+        keyPoses.reset(new pcl::PointCloud<PointType>());
 
         kdtreeSurroundingKeyPoses.reset(new pcl::KdTreeFLANN<PointType>());
 
@@ -227,16 +232,24 @@ public:
 
     void updateInitialGuess()
     {
+        if (timeFeatureIn.toSec() == timeLastIn)
+        {
+            printf("Already updated... cur: %f, last: %f\n", timeFeatureIn.toSec(), timeLastIn);
+            return;
+        }
+
+        numAssociatedPoint = 0;
+
         affineInitial = pcl::getTransformation(latestX, latestY, latestZ, latestRoll, latestPitch, latestYaw);
         
         static Eigen::Affine3f lastImuAffine;
         // initialization
         if (cloudKeyPoses6D->points.empty())
         {
-            latestRoll = cloudInfo.imuRollInit;
-            latestPitch = cloudInfo.imuPitchInit;
-            latestYaw = cloudInfo.imuYawInit;
-            lastImuAffine = pcl::getTransformation(0.0, 0.0, 0.0, cloudInfo.imuRollInit, cloudInfo.imuPitchInit, cloudInfo.imuYawInit);
+            latestRoll = featureInfo.imuRollInit;
+            latestPitch = featureInfo.imuPitchInit;
+            latestYaw = featureInfo.imuYawInit;
+            lastImuAffine = pcl::getTransformation(0.0, 0.0, 0.0, featureInfo.imuRollInit, featureInfo.imuPitchInit, featureInfo.imuYawInit);
             printf("Initial: %f %f %f %f %f %f\n", 0, latestY, latestZ, latestRoll, latestPitch, latestYaw);
             return; 
         }
@@ -244,11 +257,11 @@ public:
         static bool skipped = false;
         static Eigen::Affine3f lastImuPreAffine;
 
-        if (cloudInfo.odomAvailable == true)
+        if (featureInfo.odomAvailable == true)
         {
-            Eigen::Affine3f affineBack = pcl::getTransformation(cloudInfo.initialGuessX, cloudInfo.initialGuessY, cloudInfo.initialGuessZ,
-                                                cloudInfo.initialGuessRoll, cloudInfo.initialGuessPitch, cloudInfo.initialGuessYaw);  
-            printf("Initial odom: %f %f %f %f %f %f\n", cloudInfo.initialGuessX, cloudInfo.initialGuessY, cloudInfo.initialGuessZ, cloudInfo.initialGuessRoll, cloudInfo.initialGuessPitch, cloudInfo.initialGuessYaw);
+            Eigen::Affine3f affineBack = pcl::getTransformation(featureInfo.initialGuessX, featureInfo.initialGuessY, featureInfo.initialGuessZ,
+                                                featureInfo.initialGuessRoll, featureInfo.initialGuessPitch, featureInfo.initialGuessYaw);  
+            printf("Initial odom: %f %f %f %f %f %f\n", featureInfo.initialGuessX, featureInfo.initialGuessY, featureInfo.initialGuessZ, featureInfo.initialGuessRoll, featureInfo.initialGuessPitch, featureInfo.initialGuessYaw);
             if (!skipped)
             {
                 printf("Skipped\n");
@@ -266,21 +279,21 @@ public:
                 pcl::getTranslationAndEulerAngles(transFinal, latestX, latestY, latestZ, latestRoll, latestPitch, latestYaw);
                 printf("Odom: %f %f %f %f %f %f\n", latestX, latestY, latestZ, latestRoll, latestPitch, latestYaw);
                 lastImuPreAffine = affineBack;
-                lastImuAffine = pcl::getTransformation(0, 0, 0, cloudInfo.imuRollInit, cloudInfo.imuPitchInit, cloudInfo.imuYawInit);
+                lastImuAffine = pcl::getTransformation(0, 0, 0, featureInfo.imuRollInit, featureInfo.imuPitchInit, featureInfo.imuYawInit);
                 return;
             }
         }
 
-        if (cloudInfo.imuAvailable == true)
+        if (featureInfo.imuAvailable == true)
         {
-            printf("Initial rpy: %f %f %f\n", cloudInfo.imuRollInit, cloudInfo.imuPitchInit, cloudInfo.imuYawInit);
-            Eigen::Affine3f transBack = pcl::getTransformation(0, 0, 0, cloudInfo.imuRollInit, cloudInfo.imuPitchInit, cloudInfo.imuYawInit);
+            printf("Initial rpy: %f %f %f\n", featureInfo.imuRollInit, featureInfo.imuPitchInit, featureInfo.imuYawInit);
+            Eigen::Affine3f transBack = pcl::getTransformation(0, 0, 0, featureInfo.imuRollInit, featureInfo.imuPitchInit, featureInfo.imuYawInit);
             Eigen::Affine3f transIncre = lastImuAffine.inverse() * transBack;
             Eigen::Affine3f transTobe = pcl::getTransformation(latestX, latestY, latestZ, latestRoll, latestPitch, latestYaw);
             Eigen::Affine3f transFinal = transTobe * transIncre;
             pcl::getTranslationAndEulerAngles(transFinal, latestX, latestY, latestZ, latestRoll, latestPitch, latestYaw);
             printf("RPY: %f %f %f %f %f %f\n", latestX, latestY, latestZ, latestRoll, latestPitch, latestYaw);
-            lastImuAffine = pcl::getTransformation(0, 0, 0, cloudInfo.imuRollInit, cloudInfo.imuPitchInit, cloudInfo.imuYawInit);
+            lastImuAffine = pcl::getTransformation(0, 0, 0, featureInfo.imuRollInit, featureInfo.imuPitchInit, featureInfo.imuYawInit);
             return;
         }
     }
@@ -292,21 +305,130 @@ public:
         if (cloudKeyPoses6D->points.empty())
         {
             factorGraph.add(PriorFactor<Pose3>(Symbol('x', 0), poseTo, poseNoise));
-            timestamps[Symbol('x', 0)] = cloudInfoTimeIn.toSec();
+            timestamps[Symbol('x', 0)] = timeFeatureIn.toSec();
             initialEstimate.insert(Symbol('x', 0), poseTo);
         } else {
+            if (cloudKeyPoses6D->points.size() == 1)
+                factorGraph.add(PriorFactor<Pose3>(Symbol('x', 1), poseTo, poseNoise));
+
             Pose3 poseFrom = pclPoint2gtsamPose(cloudKeyPoses6D->points.back());
             int keyFrom = cloudKeyPoses6D->size() - 1;
             int keyTo = cloudKeyPoses6D->size();
             factorGraph.add(BetweenFactor<Pose3>(Symbol('x', keyFrom), Symbol('x', keyTo), 
                                                 poseFrom.between(poseTo), odomNoise));
             initialEstimate.insert(Symbol('x', keyTo), poseTo);
-            timestamps[Symbol('x', keyTo)] = cloudInfoTimeIn.toSec();
+            timestamps[Symbol('x', keyTo)] = timeFeatureIn.toSec();
         }
+    }
+
+
+    void addPointFactor2()
+    {
+        if (featureId < 0)
+            return;
+
+        TicToc tictoc;
+
+        visualization_msgs::MarkerArray pointLandmark;
+        
+        printf("addPointFactor: %d -- cur: %f, last: %f, est: %f\n", featureId, timeFeatureIn.toSec(), timeLastIn, featureInfo.estimatedDepth);
+
+        Cal3_S2::shared_ptr K(new Cal3_S2(230.39028930664062, 230.31454467773438, 0.0, 239.93666076660156, 136.52784729003906));
+        Point2 measurement = Point2(featureInfo.uv.x, featureInfo.uv.y);
+        Eigen::Affine3f curPose = pcl::getTransformation(featureInfo.initialGuessX,
+                                                        featureInfo.initialGuessY,
+                                                        featureInfo.initialGuessZ,
+                                                        featureInfo.initialGuessRoll,
+                                                        featureInfo.initialGuessPitch,
+                                                        featureInfo.initialGuessYaw); 
+
+        // update counter
+        if (numSeen.find(featureId) == numSeen.end())
+        {
+            numSeen[featureId] = 1;
+        } else {
+            numSeen[featureId]++;
+        }
+
+        if (featureInfo.estimatedDepth >= 0.0)
+        {
+            // convert point to world frame
+            float worldX = curPose(0,0)*featureInfo.point3d.x+curPose(0,1)*featureInfo.point3d.y+curPose(0,2)*featureInfo.point3d.z+curPose(0,3);
+            float worldY = curPose(1,0)*featureInfo.point3d.x+curPose(1,1)*featureInfo.point3d.y+curPose(1,2)*featureInfo.point3d.z+curPose(1,3);
+            float worldZ = curPose(2,0)*featureInfo.point3d.x+curPose(2,1)*featureInfo.point3d.y+curPose(2,2)*featureInfo.point3d.z+curPose(2,3);
+            Point3 worldPoint = Point3(worldX, worldY, worldZ);
+
+            factorGraph.emplace_shared<GenericProjectionFactor<Pose3, Point3, Cal3_S2>>(
+                measurement, measNoise, Symbol('x', cloudKeyPoses6D->size()), Symbol('l', featureId), K);
+            timestamps[Symbol('l', featureId)] = timeFeatureIn.toSec();
+
+            // visualization (off for operation)
+            visualization_msgs::Marker marker;
+            marker.action = 0;
+            marker.type = 2; // sphere
+            marker.ns = "points";
+            marker.id = featureId;
+            marker.pose.position.x = worldPoint.x();
+            marker.pose.position.y = worldPoint.y();
+            marker.pose.position.z = worldPoint.z();
+            marker.header.frame_id = mapFrame;
+            marker.scale.x = 0.2;
+            marker.scale.y = 0.2;
+            marker.scale.z = 0.2;
+            marker.color.r = 0.5451;
+            marker.color.g = 0.0;
+            marker.color.b = 1.0;
+            marker.color.a = 1.0;
+            pointLandmark.markers.push_back(marker);
+            numAssociatedPoint++;
+
+            if (!initialized[featureId])
+            {
+                initialized[featureId] = true;
+                initialEstimate.insert(Symbol('l', featureId), worldPoint);
+                if (marginalCovariances.find(featureId) == marginalCovariances.end()) // first initialized
+                    factorGraph.add(PriorFactor<Point3>(Symbol('l', featureId), worldPoint, pointNoise));
+                else // marginalized before
+                    factorGraph.add(PriorFactor<Point3>(Symbol('l', featureId), worldPoint, marginalCovariances[featureId]));
+            }
+        }
+        else
+        {
+            if (!initialized[featureId])
+            {
+                if (numSeen[featureId] >= 10)
+                {
+                    SmartFactor::shared_ptr smartfactor = smartPerId[featureId];
+                    factorGraph.push_back(smartfactor);
+                }
+
+                if (smartPerId.find(featureId) == smartPerId.end()) // first initialized
+                {
+                    SmartFactor::shared_ptr smartfactor(new SmartFactor(measNoise, K));
+                    Point2 measurement = Point2(featureInfo.uv.x, featureInfo.uv.y);
+                    smartfactor->add(measurement, Symbol('x', (int)cloudKeyPoses6D->size()));
+                    smartPerId[featureId] = smartfactor;
+                }
+                else
+                {
+                    SmartFactor::shared_ptr smartfactor = smartPerId[featureId];
+                    Point2 measurement = Point2(featureInfo.uv.x, featureInfo.uv.y);
+                    smartfactor->add(measurement, Symbol('x', (int)cloudKeyPoses6D->size()));
+                }                
+            }
+        }
+            
+        printf("# of points: %d\n", numAssociatedPoint);
+        pubPoint.publish(pointLandmark);
+        ROS_WARN("Add point factor time: %fms\n", tictoc.toc());
+
     }
 
     void addPointFactor()
     {
+        if (featureId < 0)
+            return;
+
         TicToc tictoc;
 
         int numPoint = 0;
@@ -315,215 +437,212 @@ public:
         
         Cal3_S2::shared_ptr K(new Cal3_S2(230.39028930664062, 230.31454467773438, 0.0, 239.93666076660156, 136.52784729003906));
 
-        while (!fManager.pointQueue.empty())
+        printf("addPointFactor: %d -- cur: %f, last: %f, est: %f\n", featureId, timeFeatureIn.toSec(), timeLastIn, featureInfo.estimatedDepth);
+
+        Point2 measurement = Point2(featureInfo.uv.x, featureInfo.uv.y);
+        Eigen::Affine3f curPose = pcl::getTransformation(featureInfo.initialGuessX,
+                                                        featureInfo.initialGuessY,
+                                                        featureInfo.initialGuessZ,
+                                                        featureInfo.initialGuessRoll,
+                                                        featureInfo.initialGuessPitch,
+                                                        featureInfo.initialGuessYaw); 
+        // update counter
+        if (numSeen.find(featureId) == numSeen.end())
         {
-            int featureId = fManager.pointQueue.front().first;
-            FeaturePerFrame fpf = fManager.pointQueue.front().second;
-
-            fManager.pointQueue.pop_front();
-
-            if (fpf.timestamp >= timeLastIn)
-            {
-                printf("addPointFactor: %d -- cur: %f, last: %f, est: %f\n", featureId, fpf.timestamp, timeLastIn, fpf.estimatedDepth);
-                timeLastIn = fpf.timestamp;
-                Point2 measurement = Point2(fpf.uv.x(), fpf.uv.y());
-                Eigen::Affine3f curPose = pcl::getTransformation(fpf.initX, fpf.initY, fpf.initZ, fpf.initRoll, fpf.initPitch, fpf.initYaw);
-
-                // update counter
-                if (numSeen.find(featureId) == numSeen.end())
-                {
-                    numSeen[featureId] = 1;
-                } else {
-                    numSeen[featureId]++;
-                }
-
-                // create different factors for different points
-                if (fpf.estimatedDepth >= 0.0)
-                {
-                    // convert point to world frame
-                    float worldX = curPose(0,0)*fpf.point3d.x()+curPose(0,1)*fpf.point3d.y()+curPose(0,2)*fpf.point3d.z()+curPose(0,3);
-                    float worldY = curPose(1,0)*fpf.point3d.x()+curPose(1,1)*fpf.point3d.y()+curPose(1,2)*fpf.point3d.z()+curPose(1,3);
-                    float worldZ = curPose(2,0)*fpf.point3d.x()+curPose(2,1)*fpf.point3d.y()+curPose(2,2)*fpf.point3d.z()+curPose(2,3);
-                    Point3 worldPoint = Point3(worldX, worldY, worldZ);
-
-                    factorGraph.emplace_shared<GenericProjectionFactor<Pose3, Point3, Cal3_S2>>(
-                        measurement, measNoise, Symbol('x', cloudKeyPoses6D->size()), Symbol('l', featureId), K);
-                    timestamps[Symbol('l', featureId)] = fpf.timestamp;
-
-                    // visualization (off for operation)
-                    visualization_msgs::Marker marker;
-                    marker.action = 0;
-                    marker.type = 2; // sphere
-                    marker.ns = "points";
-                    marker.id = featureId;
-                    marker.pose.position.x = worldPoint.x();
-                    marker.pose.position.y = worldPoint.y();
-                    marker.pose.position.z = worldPoint.z();
-                    marker.header.frame_id = mapFrame;
-                    marker.scale.x = 0.2;
-                    marker.scale.y = 0.2;
-                    marker.scale.z = 0.2;
-                    marker.color.r = 0.5451;
-                    marker.color.g = 0.0;
-                    marker.color.b = 1.0;
-                    marker.color.a = 1.0;
-                    pointLandmark.markers.push_back(marker);
-
-                    if (!initialized[featureId])
-                    {
-                        initialized[featureId] = true;
-                        initialEstimate.insert(Symbol('l', featureId), worldPoint);
-                        if (marginalCovariances.find(featureId) == marginalCovariances.end()) // first initialized
-                            factorGraph.add(PriorFactor<Point3>(Symbol('l', featureId), worldPoint, pointNoise));
-                        else // marginalized before
-                            factorGraph.add(PriorFactor<Point3>(Symbol('l', featureId), worldPoint, marginalCovariances[featureId]));
-                    }
-                }
-                else
-                {
-
-                }
-                numPoint++;
-            }
+            numSeen[featureId] = 1;
+        } else {
+            numSeen[featureId]++;
         }
 
+        // create different factors for different points
+        if (featureInfo.estimatedDepth >= 0.0)
+        {
+            // convert point to world frame
+            float worldX = curPose(0,0)*featureInfo.point3d.x+curPose(0,1)*featureInfo.point3d.y+curPose(0,2)*featureInfo.point3d.z+curPose(0,3);
+            float worldY = curPose(1,0)*featureInfo.point3d.x+curPose(1,1)*featureInfo.point3d.y+curPose(1,2)*featureInfo.point3d.z+curPose(1,3);
+            float worldZ = curPose(2,0)*featureInfo.point3d.x+curPose(2,1)*featureInfo.point3d.y+curPose(2,2)*featureInfo.point3d.z+curPose(2,3);
+            Point3 worldPoint = Point3(worldX, worldY, worldZ);
+
+            factorGraph.emplace_shared<GenericProjectionFactor<Pose3, Point3, Cal3_S2>>(
+                measurement, measNoise, Symbol('x', cloudKeyPoses6D->size()), Symbol('l', featureId), K);
+            timestamps[Symbol('l', featureId)] = timeFeatureIn.toSec();
+
+            // visualization (off for operation)
+            visualization_msgs::Marker marker;
+            marker.action = 0;
+            marker.type = 2; // sphere
+            marker.ns = "points";
+            marker.id = featureId;
+            marker.pose.position.x = worldPoint.x();
+            marker.pose.position.y = worldPoint.y();
+            marker.pose.position.z = worldPoint.z();
+            marker.header.frame_id = mapFrame;
+            marker.scale.x = 0.2;
+            marker.scale.y = 0.2;
+            marker.scale.z = 0.2;
+            marker.color.r = 0.5451;
+            marker.color.g = 0.0;
+            marker.color.b = 1.0;
+            marker.color.a = 1.0;
+            pointLandmark.markers.push_back(marker);
+
+            if (!initialized[featureId])
+            {
+                initialized[featureId] = true;
+                initialEstimate.insert(Symbol('l', featureId), worldPoint);
+                if (marginalCovariances.find(featureId) == marginalCovariances.end()) // first initialized
+                    factorGraph.add(PriorFactor<Point3>(Symbol('l', featureId), worldPoint, pointNoise));
+                else // marginalized before
+                    factorGraph.add(PriorFactor<Point3>(Symbol('l', featureId), worldPoint, marginalCovariances[featureId]));
+            }
+        }
+        else
+        {
+            printf("Not associated point\n");
+            SmartFactor::shared_ptr smartfactor(new SmartFactor(measNoise, K));
+            Point2 measurement = Point2(featureInfo.uv.x, featureInfo.uv.y);
+            smartfactor->add(measurement, Symbol('x', (int)cloudKeyPoses6D->size()));
+            factorGraph.push_back(smartfactor);
+        }
+        numPoint++;
+            
         printf("# of points: %d\n", numPoint);
         pubPoint.publish(pointLandmark);
         ROS_WARN("Add point factor time: %fms\n", tictoc.toc());
 
     }
 
-    void addPointFactor2()
-    {
-        TicToc tictoc;
+    // void addPointFactor2()
+    // {
+    //     TicToc tictoc;
 
-        if (cloudInfo.point_feature.points.size() == 0) 
-            return;
+    //     if (cloudInfo.point_feature.points.size() == 0) 
+    //         return;
 
-        int numPoint = 0;
-        visualization_msgs::MarkerArray pointLandmark;
-        // cv::Mat testImg(ROW, COL, CV_8UC3, Scalar(255, 255, 255)); 
-        // cv_bridge::CvImagePtr cv_ptr(new cv_bridge::CvImage);
+    //     int numPoint = 0;
+    //     visualization_msgs::MarkerArray pointLandmark;
+    //     // cv::Mat testImg(ROW, COL, CV_8UC3, Scalar(255, 255, 255)); 
+    //     // cv_bridge::CvImagePtr cv_ptr(new cv_bridge::CvImage);
 
-        // cv_ptr->encoding = "bgr8";
-        // cv_ptr->header.stamp = cloudInfo.header.stamp;
-        // cv_ptr->header.frame_id = "image";
-        // cv_ptr->image = testImg;
+    //     // cv_ptr->encoding = "bgr8";
+    //     // cv_ptr->header.stamp = cloudInfo.header.stamp;
+    //     // cv_ptr->header.frame_id = "image";
+    //     // cv_ptr->image = testImg;
 
-        Eigen::Affine3f affineNow = pcl::getTransformation(latestX, latestY, latestZ, latestRoll, latestPitch, latestYaw);
-        float camPosX, camPosY, camPosZ, camRotX, camRotY, camRotZ;
-        pcl::getTranslationAndEulerAngles(affineNow, camPosX, camPosY, camPosZ, camRotX, camRotY, camRotZ);
+    //     Eigen::Affine3f affineNow = pcl::getTransformation(latestX, latestY, latestZ, latestRoll, latestPitch, latestYaw);
+    //     float camPosX, camPosY, camPosZ, camRotX, camRotY, camRotZ;
+    //     pcl::getTranslationAndEulerAngles(affineNow, camPosX, camPosY, camPosZ, camRotX, camRotY, camRotZ);
 
-        Cal3_S2::shared_ptr K(new Cal3_S2(230.39028930664062, 230.31454467773438, 0.0, 239.93666076660156, 136.52784729003906));
+    //     Cal3_S2::shared_ptr K(new Cal3_S2(230.39028930664062, 230.31454467773438, 0.0, 239.93666076660156, 136.52784729003906));
 
-        for (size_t i = 0; i < cloudInfo.point_feature.points.size(); ++i)
-        {
-            Point2 measurement = Point2(double(cloudInfo.point_feature.channels[4].values[i]), 
-                                        double(cloudInfo.point_feature.channels[5].values[i]));
+    //     for (size_t i = 0; i < cloudInfo.point_feature.points.size(); ++i)
+    //     {
+    //         Point2 measurement = Point2(double(cloudInfo.point_feature.channels[4].values[i]), 
+    //                                     double(cloudInfo.point_feature.channels[5].values[i]));
             
-            // TO-DO: modify the method to check association
-            bool associated = !(cloudInfo.point_feature.channels[1].values[i] == 0.0
-                                && cloudInfo.point_feature.channels[2].values[i] == 0.0
-                                && cloudInfo.point_feature.channels[3].values[i] == 0.0);
+    //         // TO-DO: modify the method to check association
+    //         bool associated = !(cloudInfo.point_feature.channels[1].values[i] == 0.0
+    //                             && cloudInfo.point_feature.channels[2].values[i] == 0.0
+    //                             && cloudInfo.point_feature.channels[3].values[i] == 0.0);
             
-            int id = int(cloudInfo.point_feature.channels[0].values[i]);
+    //         int id = int(cloudInfo.point_feature.channels[0].values[i]);
 
-            if (numSeen.find(id) == numSeen.end())
-                numSeen[id] = 1;
-            else
-                numSeen[id]++;
+    //         if (numSeen.find(id) == numSeen.end())
+    //             numSeen[id] = 1;
+    //         else
+    //             numSeen[id]++;
 
-            if (associated)
-            {
-                if (numSeen[id] >= 1)
-                {
-                    // printf("id %d Num seen: %d\n", id, numSeen[id]);
-                    lastTime[id] = cloudInfoTimeIn.toSec();
+    //         if (associated)
+    //         {
+    //             if (numSeen[id] >= 1)
+    //             {
+    //                 // printf("id %d Num seen: %d\n", id, numSeen[id]);
+    //                 lastTime[id] = cloudInfoTimeIn.toSec();
 
-                    // convert point to world frame
-                    float localX = cloudInfo.point_feature.channels[1].values[i];
-                    float localY = cloudInfo.point_feature.channels[2].values[i];
-                    float localZ = cloudInfo.point_feature.channels[3].values[i];
-                    float worldX = affineNow(0,0)*localX+affineNow(0,1)*localY+affineNow(0,2)*localZ+affineNow(0,3);
-                    float worldY = affineNow(1,0)*localX+affineNow(1,1)*localY+affineNow(1,2)*localZ+affineNow(1,3);
-                    float worldZ = affineNow(2,0)*localX+affineNow(2,1)*localY+affineNow(2,2)*localZ+affineNow(2,3);
-                    Point3 worldPoint = Point3(worldX, worldY, worldZ);
+    //                 // convert point to world frame
+    //                 float localX = cloudInfo.point_feature.channels[1].values[i];
+    //                 float localY = cloudInfo.point_feature.channels[2].values[i];
+    //                 float localZ = cloudInfo.point_feature.channels[3].values[i];
+    //                 float worldX = affineNow(0,0)*localX+affineNow(0,1)*localY+affineNow(0,2)*localZ+affineNow(0,3);
+    //                 float worldY = affineNow(1,0)*localX+affineNow(1,1)*localY+affineNow(1,2)*localZ+affineNow(1,3);
+    //                 float worldZ = affineNow(2,0)*localX+affineNow(2,1)*localY+affineNow(2,2)*localZ+affineNow(2,3);
+    //                 Point3 worldPoint = Point3(worldX, worldY, worldZ);
 
-                    // project point for checking
-                    Pose3 camPose = float2gtsamPose(camPosX, camPosY, camPosZ, camRotX, camRotY, camRotZ);
-                    PinholeCamera<Cal3_S2> camera(camPose, *K);
-                    Point2 estimation = camera.project(worldPoint);
+    //                 // project point for checking
+    //                 Pose3 camPose = float2gtsamPose(camPosX, camPosY, camPosZ, camRotX, camRotY, camRotZ);
+    //                 PinholeCamera<Cal3_S2> camera(camPose, *K);
+    //                 Point2 estimation = camera.project(worldPoint);
 
-                    // add projection factor 
-                    float reprojError = sqrt((measurement.x()-estimation.x())*(measurement.x()-estimation.x()) +
-                                                (measurement.y()-estimation.y())*(measurement.y()-estimation.y()));
+    //                 // add projection factor 
+    //                 float reprojError = sqrt((measurement.x()-estimation.x())*(measurement.x()-estimation.x()) +
+    //                                             (measurement.y()-estimation.y())*(measurement.y()-estimation.y()));
 
-                    if (reprojError < projectionErrorThres)
-                    {
-                        factorGraph.emplace_shared<GenericProjectionFactor<Pose3, Point3, Cal3_S2>>(
-                            measurement, measNoise, Symbol('x', cloudKeyPoses6D->size()), Symbol('l', id), K);
-                        timestamps[Symbol('l', id)] = cloudInfoTimeIn.toSec();
+    //                 if (reprojError < projectionErrorThres)
+    //                 {
+    //                     factorGraph.emplace_shared<GenericProjectionFactor<Pose3, Point3, Cal3_S2>>(
+    //                         measurement, measNoise, Symbol('x', cloudKeyPoses6D->size()), Symbol('l', id), K);
+    //                     timestamps[Symbol('l', id)] = cloudInfoTimeIn.toSec();
 
-                        // visualization (off for operation)
-                        visualization_msgs::Marker marker;
-                        marker.action = 0;
-                        marker.type = 2; // sphere
-                        marker.ns = "points";
-                        marker.id = id;
-                        marker.pose.position.x = worldPoint.x();
-                        marker.pose.position.y = worldPoint.y();
-                        marker.pose.position.z = worldPoint.z();
-                        marker.header.frame_id = mapFrame;
-                        marker.scale.x = 0.2;
-                        marker.scale.y = 0.2;
-                        marker.scale.z = 0.2;
-                        marker.color.r = 0.5451;
-                        marker.color.g = 0.0;
-                        marker.color.b = 1.0;
-                        marker.color.a = 1.0;
-                        pointLandmark.markers.push_back(marker);
+    //                     // visualization (off for operation)
+    //                     visualization_msgs::Marker marker;
+    //                     marker.action = 0;
+    //                     marker.type = 2; // sphere
+    //                     marker.ns = "points";
+    //                     marker.id = id;
+    //                     marker.pose.position.x = worldPoint.x();
+    //                     marker.pose.position.y = worldPoint.y();
+    //                     marker.pose.position.z = worldPoint.z();
+    //                     marker.header.frame_id = mapFrame;
+    //                     marker.scale.x = 0.2;
+    //                     marker.scale.y = 0.2;
+    //                     marker.scale.z = 0.2;
+    //                     marker.color.r = 0.5451;
+    //                     marker.color.g = 0.0;
+    //                     marker.color.b = 1.0;
+    //                     marker.color.a = 1.0;
+    //                     pointLandmark.markers.push_back(marker);
 
-                        if (!initialized[id])
-                        {
-                            initialized[id] = true;
-                            initialEstimate.insert(Symbol('l', id), worldPoint);
-                            if (marginalCovariances.find(id) == marginalCovariances.end()) // first initialized
-                                factorGraph.add(PriorFactor<Point3>(Symbol('l', id), worldPoint, pointNoise));
-                            else // marginalized before
-                                factorGraph.add(PriorFactor<Point3>(Symbol('l', id), worldPoint, marginalCovariances[id]));
-                        }
-                        // cv::putText(cv_ptr->image, to_string(id), Point(measurement.x(), measurement.y()), 
-                        //             cv::FONT_HERSHEY_COMPLEX_SMALL, 0.5, cv::Scalar(0, 255, 0), 0.5, cv::LINE_AA);
-                    }
-                    else
-                    {
-                        // cv::putText(cv_ptr->image, to_string(id), Point(measurement.x(), measurement.y()), 
-                        //             cv::FONT_HERSHEY_COMPLEX_SMALL, 0.5, cv::Scalar(0, 0, 255), 0.5, cv::LINE_AA);
-                    }
+    //                     if (!initialized[id])
+    //                     {
+    //                         initialized[id] = true;
+    //                         initialEstimate.insert(Symbol('l', id), worldPoint);
+    //                         if (marginalCovariances.find(id) == marginalCovariances.end()) // first initialized
+    //                             factorGraph.add(PriorFactor<Point3>(Symbol('l', id), worldPoint, pointNoise));
+    //                         else // marginalized before
+    //                             factorGraph.add(PriorFactor<Point3>(Symbol('l', id), worldPoint, marginalCovariances[id]));
+    //                     }
+    //                     // cv::putText(cv_ptr->image, to_string(id), Point(measurement.x(), measurement.y()), 
+    //                     //             cv::FONT_HERSHEY_COMPLEX_SMALL, 0.5, cv::Scalar(0, 255, 0), 0.5, cv::LINE_AA);
+    //                 }
+    //                 else
+    //                 {
+    //                     // cv::putText(cv_ptr->image, to_string(id), Point(measurement.x(), measurement.y()), 
+    //                     //             cv::FONT_HERSHEY_COMPLEX_SMALL, 0.5, cv::Scalar(0, 0, 255), 0.5, cv::LINE_AA);
+    //                 }
                     
-                    // // visualization (test image for projection)
-                    // cv::line(cv_ptr->image, cv::Point(measurement.x(), measurement.y()), cv::Point(estimation.x(), estimation.y()), Scalar(255, 0, 0), 1, LINE_8);
+    //                 // // visualization (test image for projection)
+    //                 // cv::line(cv_ptr->image, cv::Point(measurement.x(), measurement.y()), cv::Point(estimation.x(), estimation.y()), Scalar(255, 0, 0), 1, LINE_8);
 
-                    numPoint++;
-                }
+    //                 numPoint++;
+    //             }
             
-            }
-            else
-            {
-                if (numSeen[id] >= 5)
-                {
+    //         }
+    //         else
+    //         {
+    //             if (numSeen[id] >= 5)
+    //             {
 
-                }
-            }
-        }
+    //             }
+    //         }
+    //     }
 
 
-        printf("# of points: %d\n", numPoint);
-        pubPoint.publish(pointLandmark);
-        // pubTestImage.publish(cv_ptr->toImageMsg());
+    //     printf("# of points: %d\n", numPoint);
+    //     pubPoint.publish(pointLandmark);
+    //     // pubTestImage.publish(cv_ptr->toImageMsg());
 
-        ROS_WARN("Add point factor time: %fms\n", tictoc.toc());
-    }
+    //     ROS_WARN("Add point factor time: %fms\n", tictoc.toc());
+    // }
 
     void updatePath(const PointTypePose& pose_in, nav_msgs::Path& path)
     {
@@ -548,11 +667,14 @@ public:
 
     void publishOdometry()
     {
+        if (timeFeatureIn.toSec() == timeLastIn)
+            return;
+        
         nav_msgs::Odometry odomIncre;
         Eigen::Affine3f affineFinal = pcl::getTransformation(latestX, latestY, latestZ, latestRoll, latestPitch, latestYaw) * affineL2C.inverse();
         float x, y, z, roll, pitch, yaw;
         pcl::getTranslationAndEulerAngles(affineFinal, x, y, z, roll, pitch, yaw);
-        odomIncre.header.stamp = cloudInfoTimeIn;
+        odomIncre.header.stamp = timeFeatureIn;
         odomIncre.header.frame_id = odometryFrame;
         odomIncre.child_frame_id = "odom_mapping";
         odomIncre.pose.pose.position.x = x;
@@ -571,19 +693,20 @@ public:
             return;
 
         fManager.inputCloudNearby(laserCloudFromMap);
+        publishCloud(&pubCloudNearby, laserCloudFromMap, timeFeatureIn, mapFrame);
 
         // publish key poses
         static tf::TransformBroadcaster tfMap2Cam;
         tf::Transform map2Cam = tf::Transform(tf::createQuaternionFromRPY(latestRoll, latestPitch, latestYaw), 
                                               tf::Vector3(latestX, latestY, latestZ));
-        tfMap2Cam.sendTransform(tf::StampedTransform(map2Cam, cloudInfoTimeIn, mapFrame, camFrame));
+        tfMap2Cam.sendTransform(tf::StampedTransform(map2Cam, timeFeatureIn, mapFrame, camFrame));
         
         ROS_WARN("publish frames");
 
         // publish global path
         if (pubPath.getNumSubscribers() != 0)
         {
-            globalPath.header.stamp = cloudInfoTimeIn;
+            globalPath.header.stamp = timeFeatureIn;
             globalPath.header.frame_id = mapFrame;
             pubPath.publish(globalPath);
         }
@@ -591,7 +714,7 @@ public:
         // temp
         if (pubInitialPath.getNumSubscribers() != 0)
         {
-            initialPath.header.stamp = cloudInfoTimeIn;
+            initialPath.header.stamp = timeFeatureIn;
             initialPath.header.frame_id = mapFrame;
             pubInitialPath.publish(initialPath);
         }
@@ -614,7 +737,7 @@ public:
         fManager.inputCloudInfo(*msgIn);
     }
 
-    void odometryHandler (const nav_msgs::OdometryConstPtr &odomMsg)
+    void odometryHandler(const nav_msgs::OdometryConstPtr &odomMsg)
     {
         fManager.inputOdom(*odomMsg);
     }
@@ -626,119 +749,118 @@ public:
 
     void processOptimization()
     {
-        while(1)
+        ros::Rate rate(500);
+
+        while (ros::ok())
         {
+            rate.sleep();
+
+            mtx.lock();
+
             if (!fManager.featureQueue.empty())
             {
-                cloudInfo = fManager.featureQueue.front();
-                cloudInfoTimeIn = cloudInfo.header.stamp;
+                featureId = fManager.featureQueue.front().first;
+                featureInfo = fManager.featureQueue.front().second;
+                timeFeatureIn = featureInfo.header.stamp;
+
                 featLock.lock();
                 fManager.featureQueue.pop_front();
                 featLock.unlock();
-                printf("cloudInfoTimeIn: %f, Last: %f\n", cloudInfoTimeIn.toSec(), timeLastIn);
 
-                if (cloudInfoTimeIn.toSec() > timeLastIn)
+                ROS_WARN("id: %d, featureInfo: %f, Last: %f\n", featureId, timeFeatureIn.toSec(), timeLastIn);
+
+                if (timeFeatureIn.toSec() >= timeLastIn)
                 {
-                    laserCloudDeskewLast->clear();
-                    pcl::fromROSMsg(cloudInfo.cloud_deskewed, *laserCloudDeskewLast);
-                    pcl::fromROSMsg(cloudInfo.cloud_corner, *laserCloudCornerLast);
-                    pcl::fromROSMsg(cloudInfo.cloud_surface, *laserCloudSurfLast);
-
-                    lock_guard<mutex> lock(mtx);
-
-                    timeLastIn = cloudInfoTimeIn.toSec();
-
-                    // static double timeLastProcessing = -1;
-
-                    // if (cloudInfoTimeIn.toSec() - timeLastProcessing >= mappingProcessInterval)
-                    // {
-                        // timeLastProcessing = cloudInfoTimeIn.toSec();
+                    if (featureId < 0) // pointcloud feature
+                    { 
+                        laserCloudDeskewLast->clear();
+                        pcl::fromROSMsg(featureInfo.cloud_deskewed, *laserCloudDeskewLast);
+                        pcl::fromROSMsg(featureInfo.cloud_corner, *laserCloudCornerLast);
+                        pcl::fromROSMsg(featureInfo.cloud_surface, *laserCloudSurfLast);
+                        printf("CloudDeskewSize: %d\n", (int)laserCloudDeskewLast->size());
                         
-                        updateInitialGuess();
-
                         downsampleCurrentScan();
 
                         // scan2MapOptimization(); 
+                    }
 
-                        optimize();
+                    updateInitialGuess();
 
-                        extractNearby();
+                    optimize();
 
-                        publishOdometry();
+                    extractNearby();
 
-                        publishFrames();
+                    publishOdometry();
 
-                        ROS_WARN("Keyframe count: %d\n", count);
-                    // }
+                    publishFrames();
+
+                    timeLastIn = timeFeatureIn.toSec();
+
                 }
+                ROS_WARN("Keyframe count: %d\n", count);
+
             } 
-            else 
-            {
-                // ROS_WARN("Not yet published");
-                // printf("Visual keyframe count: %d\n", fManager.frameCount);
-            }
 
             fManager.removeOldFeatures(timeLastIn - timeLag);       
 
-            std::chrono::milliseconds dura(2);
-            std::this_thread::sleep_for(dura);
+            mtx.unlock();
         }
     }
 
-    void featureInfoHandler(const sensor_fusion::cloud_infoConstPtr &cloudInfoMsg)
-    {
-        laserCloudDeskewLast->clear();
+    // void featureInfoHandler(const sensor_fusion::cloud_infoConstPtr &cloudInfoMsg)
+    // {
+    //     laserCloudDeskewLast->clear();
 
-        cloudInfo = *cloudInfoMsg;
-        cloudInfoTimeIn = cloudInfo.header.stamp;
+    //     cloudInfo = *cloudInfoMsg;
+    //     cloudInfoTimeIn = cloudInfo.header.stamp;
 
-        pcl::fromROSMsg(cloudInfo.cloud_deskewed, *laserCloudDeskewLast);
-        pcl::fromROSMsg(cloudInfo.cloud_corner, *laserCloudCornerLast);
-        pcl::fromROSMsg(cloudInfo.cloud_surface, *laserCloudSurfLast);
+    //     pcl::fromROSMsg(cloudInfo.cloud_deskewed, *laserCloudDeskewLast);
+    //     pcl::fromROSMsg(cloudInfo.cloud_corner, *laserCloudCornerLast);
+    //     pcl::fromROSMsg(cloudInfo.cloud_surface, *laserCloudSurfLast);
 
-        if (cloudInfo.point_feature.points.size() == 0)
-        {
-            ROS_WARN("Cloud Handler");
-            firstCloud = true;
-        } else {
-            ROS_WARN("Point Handler");
-        }
+    //     if (cloudInfo.point_feature.points.size() == 0)
+    //     {
+    //         ROS_WARN("Cloud Handler");
+    //         firstCloud = true;
+    //     } else {
+    //         ROS_WARN("Point Handler");
+    //     }
 
-        if (!firstCloud)
-        {
-            return;
-        }
+    //     if (!firstCloud)
+    //     {
+    //         return;
+    //     }
 
-        // TO-DO: Here if the info is from point, we have to fill in the WINDOW_SIZE
-        // For now, skip everything before the first cloud Handler
+    //     // TO-DO: Here if the info is from point, we have to fill in the WINDOW_SIZE
+    //     // For now, skip everything before the first cloud Handler
 
-        lock_guard<mutex> lock(mtx);
+    //     lock_guard<mutex> lock(mtx);
 
-        Cal3_S2::shared_ptr K(new Cal3_S2(230.39028930664062, 230.31454467773438, 0.0, 239.93666076660156, 136.52784729003906));
+    //     Cal3_S2::shared_ptr K(new Cal3_S2(230.39028930664062, 230.31454467773438, 0.0, 239.93666076660156, 136.52784729003906));
 
-        static double timeLastProcessing = -1;
+    //     static double timeLastProcessing = -1;
 
-        if (cloudInfoTimeIn.toSec() - timeLastProcessing >= mappingProcessInterval)
-        {
-            timeLastProcessing = cloudInfoTimeIn.toSec();
+    //     if (cloudInfoTimeIn.toSec() - timeLastProcessing >= mappingProcessInterval)
+    //     {
+    //         timeLastProcessing = cloudInfoTimeIn.toSec();
             
-            updateInitialGuess();
+    //         updateInitialGuess();
 
-            downsampleCurrentScan();
+    //         downsampleCurrentScan();
 
-            // scan2MapOptimization(); 
+    //         // scan2MapOptimization(); 
 
-            optimize();
+    //         optimize();
 
-            extractNearby();
+    //         extractNearby();
 
-            publishOdometry();
+    //         publishOdometry();
 
-            publishFrames();
+    //         publishFrames();
 
-            ROS_WARN("Keyframe count: %d\n", count);
-        }
-    }
+    //         ROS_WARN("Keyframe count: %d\n", count);
+    //     }
+    // }
 
     void downsampleCurrentScan()
     {
@@ -1139,7 +1261,7 @@ public:
     {
         TicToc tictoc;
 
-        if (cloudKeyPoses3D->points.empty())
+        if (cloudKeyPoses3D->points.empty() || featureId >= 0)
             return;
         
         pcl::PointCloud<PointType>::Ptr surroundingKeyPosesForStacking(new pcl::PointCloud<PointType>());
@@ -1169,6 +1291,8 @@ public:
             surroundingKeyPoses->push_back(cloudKeyPoses3D->points[id]);
         }
 
+        printf("surroundingKeyposes: %d\n", (int)surroundingKeyPoses->size());
+
         downSizeFilterSurroundingKeyPoses.setInputCloud(surroundingKeyPoses); // radius 주변 pose들 또한 voxelize를 한다.
         downSizeFilterSurroundingKeyPoses.filter(*surroundingKeyPosesDS);
 
@@ -1176,9 +1300,9 @@ public:
         int numPoses = cloudKeyPoses3D->size();
         for (int i = numPoses-1; i >= 0; --i)
         {
-            if (cloudInfoTimeIn.toSec() - cloudKeyPoses6D->points[i].time < 3.0)
+            if (timeFeatureIn.toSec() - cloudKeyPoses6D->points[i].time < 0.5)
                 surroundingKeyPosesForStacking->push_back(cloudKeyPoses3D->points[i]);
-            if (cloudInfoTimeIn.toSec() - cloudKeyPoses6D->points[i].time < 10.0)
+            if (timeFeatureIn.toSec() - cloudKeyPoses6D->points[i].time < 10.0)
                 surroundingKeyPosesDS->push_back(cloudKeyPoses3D->points[i]);
             else
                 break;
@@ -1186,9 +1310,12 @@ public:
 
         // 3. Extract cloud from nearby key poses
         laserCloudFromMap->clear();
+        printf("surroundingKeyposesforstacking: %d\n", (int)surroundingKeyPosesForStacking->size());
         for (int i = 0; i < (int)surroundingKeyPosesForStacking->size(); ++i)
         {
-            if (pointDistance(surroundingKeyPosesForStacking->points[i], cloudKeyPoses3D->back()) > surroundingKeyframeSearchRadiusSmall)
+            float distance = pointDistance(surroundingKeyPosesForStacking->points[i], cloudKeyPoses3D->back());
+            printf("pointDistance: %f\n", distance);
+            if (distance > surroundingKeyframeSearchRadiusSmall)
                 continue;
             
             int thisKeyInd = (int) surroundingKeyPosesForStacking->points[i].intensity;
@@ -1196,9 +1323,11 @@ public:
             if (laserCloudMapContainer.find(thisKeyInd) != laserCloudMapContainer.end())
             {
                 *laserCloudFromMap += laserCloudMapContainer[thisKeyInd];
+                printf("Already in the global map\n");
             } else {
                 pcl::PointCloud<PointType> globalCloud = *transformPointCloud(deskewCloudKeyFrames[thisKeyInd], &cloudKeyPoses6D->points[thisKeyInd]);
                 *laserCloudFromMap += globalCloud;
+                printf("Newly added to the global map\n");
                 laserCloudMapContainer[thisKeyInd] = globalCloud;
             }
         }
@@ -1251,16 +1380,21 @@ public:
         if (saveFrame() == false)
             return;
 
-        addOdomFactor();
-        
-        addPointFactor();
+        if (timeFeatureIn.toSec() != timeLastIn)
+            addOdomFactor();
+
+        addPointFactor2();
+
+        if (timeFeatureIn.toSec() == timeLastIn)
+            return;
 
         // cout << "  iSAM2 Smoother Keys: " << endl;
-        for(const FixedLagSmoother2::KeyTimestampMap::value_type& key_timestamp: smootherISAM2->timestamps()) {
+        // for(const FixedLagSmoother2::KeyTimestampMap::value_type& key_timestamp: smootherISAM2->timestamps()) {
             // cout << setprecision(5) << "    Key: " << DefaultKeyFormatter(key_timestamp.first) << "  Time: " << key_timestamp.second << endl;
-        }
+        // }
 
         IncrementalFixedLagSmoother2::Result result = smootherISAM2->update(factorGraph, initialEstimate, timestamps);
+        factorGraph.print("Factor graphs\n");
         smootherISAM2->update();
         updateKeyframeMap(result);
 
@@ -1302,22 +1436,25 @@ public:
         thisPose6D.pitch = latestPitch;
         thisPose6D.yaw = latestYaw;
         thisPose6D.intensity = thisPose3D.intensity;
-        thisPose6D.time = cloudInfoTimeIn.toSec();
+        thisPose6D.time = timeFeatureIn.toSec();
         cloudKeyPoses6D->push_back(thisPose6D);
         updatePath(thisPose6D, globalPath);
         
         // temp
         PointTypePose tempPose;
-        tempPose.x = cloudInfo.initialGuessX;
-        tempPose.y = cloudInfo.initialGuessY;
-        tempPose.z = cloudInfo.initialGuessZ;
-        tempPose.roll = cloudInfo.initialGuessRoll;
-        tempPose.pitch = cloudInfo.initialGuessPitch;
-        tempPose.yaw = cloudInfo.initialGuessYaw;
-        tempPose.time = cloudInfoTimeIn.toSec();
+        tempPose.x = featureInfo.initialGuessX;
+        tempPose.y = featureInfo.initialGuessY;
+        tempPose.z = featureInfo.initialGuessZ;
+        tempPose.roll = featureInfo.initialGuessRoll;
+        tempPose.pitch = featureInfo.initialGuessPitch;
+        tempPose.yaw = featureInfo.initialGuessYaw;
+        tempPose.time = timeFeatureIn.toSec();
         updatePath(tempPose, initialPath);
 
         ROS_WARN("Last optimized pose: %f %f %f %f %f %f", latestX, latestY, latestZ, latestRoll, latestPitch, latestYaw);
+
+
+        if ()
 
         // save deskewed points
         pcl::PointCloud<PointType>::Ptr thisKeyFrame(new pcl::PointCloud<PointType>());
@@ -1358,27 +1495,12 @@ public:
     }
 
     bool saveFrame()
-    {
+    {   
         if (cloudKeyPoses6D->points.empty())
             return true;
 
-        // Temp
-        int numAssociated = 0;
-        for (int i = 0; i < (int)cloudInfo.point_feature.points.size(); ++i)
-        {
-            // TO-DO: modify the method to check association
-            bool associated = !(cloudInfo.point_feature.channels[1].values[i] == 0.0
-                                && cloudInfo.point_feature.channels[2].values[i] == 0.0
-                                && cloudInfo.point_feature.channels[3].values[i] == 0.0);
-            if (associated)
-                numAssociated++;
-        }
-
-        if (numAssociated > 20)
-        {
-            ROS_WARN("Save frame -- enough number of associated points");
+        if (featureId >= 0)
             return true;
-        }
 
         Eigen::Affine3f transStart = pclPoint2Affine3f(cloudKeyPoses6D->back());
         Eigen::Affine3f transFinal = pcl::getTransformation(latestX, latestY, latestZ, latestRoll, latestPitch, latestYaw);
